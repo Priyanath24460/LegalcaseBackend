@@ -1,0 +1,10 @@
+pymongo
+pymupdf
+sentence-transformers
+faiss-cpu
+numpy
+requests
+scikit-learn
+torch
+fastapi
+uvicorn
