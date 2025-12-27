@@ -12,7 +12,7 @@ const FAISS_SERVICE_URL = process.env.FAISS_SERVICE_URL || "http://127.0.0.1:800
 // Helper function to run Python FAISS operations
 const runPythonFAISS = async (operation, data = null) => {
   return new Promise((resolve, reject) => {
-    const scriptPath = path.join(process.cwd(), "..", "LegalcasePython", "faiss_operations.py");
+    const scriptPath = path.join(process.cwd(), "python_scripts", "faiss_operations.py");
     const pythonPath = process.env.PYTHON_PATH || "python";
 
     const args = [operation];
