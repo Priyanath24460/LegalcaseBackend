@@ -46,17 +46,30 @@ export const searchQuestion = async (req, res) => {
       });
     }
 
-    // Find most relevant case (like Colab code)
+    // Find most relevant case using frequency + score tiebreaker
     const caseCounter = {};
-    topSections.forEach(sec => {
+    const caseBestScore = {};  // Track best score for each case
+    
+    console.log(`[searchQuestion] Counting cases from ${topSections.length} sections`);
+    topSections.forEach((sec, idx) => {
+      console.log(`[searchQuestion]   Section ${idx}: caseId = ${sec.caseId}, score = ${sec.score}`);
       caseCounter[sec.caseId] = (caseCounter[sec.caseId] || 0) + 1;
+      caseBestScore[sec.caseId] = Math.max(caseBestScore[sec.caseId] || 0, sec.score || 0);
     });
 
-    const mostCommonCaseId = Object.keys(caseCounter).reduce((a, b) =>
-      caseCounter[a] > caseCounter[b] ? a : b
-    );
+    console.log("[searchQuestion] Case counter:", JSON.stringify(caseCounter, null, 2));
+    console.log("[searchQuestion] Case best scores:", JSON.stringify(caseBestScore, null, 2));
+    console.log("[searchQuestion] topCases from FAISS:", topCases);
 
-    console.log(`[searchQuestion] Most relevant case: ${mostCommonCaseId}`);
+    // Select case with highest frequency, use best score as tiebreaker
+    const mostCommonCaseId = Object.keys(caseCounter).reduce((a, b) => {
+      if (caseCounter[a] > caseCounter[b]) return a;
+      if (caseCounter[a] < caseCounter[b]) return b;
+      // Tie: use best score
+      return (caseBestScore[a] || 0) >= (caseBestScore[b] || 0) ? a : b;
+    });
+
+    console.log(`[searchQuestion] Most relevant case (from counter): ${mostCommonCaseId}`);
 
     // Get case details
     let selectedCase;

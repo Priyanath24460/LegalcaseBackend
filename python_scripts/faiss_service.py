@@ -83,8 +83,8 @@ async def search_faiss(req: SearchRequest):
         print(f"[FAISS] Top scores: {scores[0][:5]}")  # Log top 5 scores
 
         results = []
-        top_cases = set()
-
+        case_scores = {}  # Changed to track both frequency and best score
+        
         print(f"[FAISS] === MOST RELEVANT RESULTS ===")
         for i, (score, idx) in enumerate(zip(scores[0], indices[0])):
             if idx < len(metadata):
@@ -94,21 +94,34 @@ async def search_faiss(req: SearchRequest):
                 section_data['caseId'] = section_data['case_id']
                 section_data['sectionId'] = section_data['section_id']
                 results.append(section_data)
-                top_cases.add(section_data['case_id'])
+                
+                # Track case frequency and best (highest) score for each case
+                case_id = section_data['case_id']
+                if case_id not in case_scores:
+                    case_scores[case_id] = {'count': 0, 'best_score': 0}
+                case_scores[case_id]['count'] += 1
+                case_scores[case_id]['best_score'] = max(case_scores[case_id]['best_score'], float(score))
                 
                 # Log all top results with clear formatting
                 print(f"[FAISS] RANK {i+1}: Section ID = {section_data['section_id']}, Case ID = {section_data['case_id']}, Score = {score:.4f}")
                 print(f"[FAISS]         Text Preview: '{section_data['text'][:150].replace(chr(10), ' ').replace(chr(13), ' ')}...'")
                 print(f"[FAISS]         ---")
 
+        # Sort cases by frequency first, then by best score as tiebreaker
+        sorted_cases = sorted(case_scores.items(), key=lambda x: (x[1]['count'], x[1]['best_score']), reverse=True)
+        top_case_ids = [case_id for case_id, scores in sorted_cases]
+        
         print(f"[FAISS] === SUMMARY ===")
         print(f"[FAISS] Total results: {len(results)}")
-        print(f"[FAISS] Unique cases found: {list(top_cases)}")
+        print(f"[FAISS] Case statistics:")
+        for case_id, stats in sorted_cases:
+            print(f"[FAISS]   {case_id}: count={stats['count']}, best_score={stats['best_score']:.4f}")
+        print(f"[FAISS] Top cases (sorted by frequency, then score): {top_case_ids}")
         print(f"[FAISS] =====================")
         return {
             'success': True,
             'topSections': results,
-            'topCases': list(top_cases),
+            'topCases': top_case_ids,  # Now properly sorted by frequency + score
             'count': len(results)
         }
     except Exception as e:

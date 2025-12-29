@@ -28,9 +28,15 @@ print(f"[Rebuild] Loaded model on {device}")
 sections = list(db.sections.find({}))
 print(f"[Rebuild] Found {len(sections)} sections in database")
 
+if len(sections) == 0:
+    print("[Rebuild] No sections found in MongoDB. Nothing to rebuild.")
+    client.close()
+    sys.exit(0)
+
 # Generate new embeddings
 embeddings_data = []
-for section in sections:
+print(f"[Rebuild] Starting to process {len(sections)} sections...")
+for idx, section in enumerate(sections, 1):
     text = section['text']
     # Clean the text the same way as the embedding service
     clean_text = text.replace('\r', ' ').replace('\n', ' ').replace('\t', ' ')
@@ -53,17 +59,30 @@ for section in sections:
         'text': clean_text,  # Store cleaned text
         'embedding': embedding
     })
-    print(f"[Rebuild] Processed section {section['sectionId']}")
+    if idx % 10 == 0 or idx == len(sections):
+        print(f"[Rebuild] Processed {idx}/{len(sections)} sections ({(idx/len(sections)*100):.1f}%)")
 
-# Rebuild FAISS index
+print(f"[Rebuild] ====================================")
+print(f"[Rebuild] Starting FAISS index rebuild...")
+print(f"[Rebuild] Total embeddings to index: {len(embeddings_data)}")
+print(f"[Rebuild] ====================================")
+
 faiss_manager = FAISSManager()
 result = faiss_manager.rebuild_index(embeddings_data)
 
+print(f"[Rebuild] ====================================")
 if result['success']:
-    print(f"[Rebuild] Successfully rebuilt index with {result['count']} items")
+    print(f"[Rebuild] ✅ Successfully rebuilt index with {result['count']} items")
+    print(f"[Rebuild] MongoDB sections: {len(sections)}")
+    print(f"[Rebuild] FAISS index items: {result['count']}")
+    if result['count'] == len(sections):
+        print(f"[Rebuild] ✅ Counts match! Index is synchronized.")
+    else:
+        print(f"[Rebuild] ⚠️ Count mismatch! Some sections may not have been indexed.")
 else:
-    print(f"[Rebuild] Failed to rebuild index: {result['error']}")
+    print(f"[Rebuild] ❌ Failed to rebuild index: {result['error']}")
     sys.exit(1)
+print(f"[Rebuild] ====================================")
 
 # Close MongoDB connection
 client.close()

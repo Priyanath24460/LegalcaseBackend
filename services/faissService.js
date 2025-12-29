@@ -66,23 +66,6 @@ const runPythonFAISS = async (operation, data = null) => {
 
 export const buildOrLoadIndex = async () => {
   try {
-    // Load existing FAISS index and metadata if available
-    let index = null;
-    let metadata = [];
-    let existingIds = new Set();
-
-    if (fs.existsSync(FAISS_INDEX_PATH) && fs.existsSync(FAISS_METADATA_PATH)) {
-      console.log("📂 Loading existing FAISS index...");
-      const loadResult = await runPythonFAISS("load");
-      if (loadResult.success) {
-        console.log(`✅ FAISS index loaded with ${loadResult.count} items`);
-        // Note: We can't directly access the index object from Python,
-        // so we'll need to rebuild incrementally
-      } else {
-        console.log("⚠️ Could not load existing index, will create new one");
-      }
-    }
-
     console.log("📚 Fetching all sections from MongoDB...");
     const allSections = await Section.find({}).sort({ createdAt: 1 }); // Sort by creation time
 
@@ -91,39 +74,49 @@ export const buildOrLoadIndex = async () => {
       return { success: true, message: "No sections to index", count: 0 };
     }
 
-    // Check which sections are already indexed by reading metadata file
+    console.log(`Found ${allSections.length} sections in MongoDB`);
+
+    // Check how many are currently in FAISS index
+    let currentIndexCount = 0;
     if (fs.existsSync(FAISS_METADATA_PATH)) {
       try {
-        const metadataContent = fs.readFileSync(FAISS_METADATA_PATH, 'utf8');
-        const existingMetadata = JSON.parse(metadataContent);
-        existingIds = new Set(existingMetadata.map(m => m.sectionId));
-        console.log(`Found ${existingIds.size} already indexed sections`);
+        // Use Python to read the pickle file
+        const checkResult = await runPythonFAISS("load");
+        if (checkResult.success) {
+          currentIndexCount = checkResult.count;
+          console.log(`Current FAISS index has ${currentIndexCount} sections`);
+        }
       } catch (error) {
-        console.log("Could not read existing metadata, will rebuild index");
-        existingIds = new Set();
+        console.log("Could not read existing index count");
       }
     }
 
-    // Find new sections that need to be indexed
-    const newSections = allSections.filter(section => !existingIds.has(section.sectionId));
-    console.log(`Found ${newSections.length} new sections to index`);
-
-    if (newSections.length === 0) {
-      console.log("✅ No new sections to add. Index is already up to date.");
+    // If counts match, index is up to date
+    if (currentIndexCount === allSections.length) {
+      console.log("✅ FAISS index is up to date with all MongoDB sections");
       return { success: true, message: "Index is up to date", count: allSections.length };
     }
 
-    // Prepare new embeddings data for Python script
-    const newEmbeddingsData = newSections.map(section => ({
+    // Otherwise, rebuild from scratch to ensure consistency
+    console.log(`⚠️ MongoDB has ${allSections.length} sections but FAISS has ${currentIndexCount}`);
+    console.log("🔄 Rebuilding FAISS index from scratch to sync all sections...");
+
+    // Prepare all embeddings data for complete rebuild
+    const allEmbeddingsData = allSections.map(section => ({
       embedding: section.embedding,
       sectionId: section.sectionId,
       caseId: section.caseId,
       text: section.text
     }));
 
-    console.log(`🧠 Adding ${newSections.length} new sections to FAISS index...`);
-    const result = await runPythonFAISS("add_incremental", newEmbeddingsData);
-    console.log(`✅ Added ${newSections.length} new sections to FAISS (Total now = ${allSections.length}).`);
+    console.log(`🧠 Building FAISS index with ${allSections.length} sections...`);
+    const result = await runPythonFAISS("rebuild", allEmbeddingsData);
+    
+    if (result.success) {
+      console.log(`✅ FAISS index rebuilt successfully with ${result.count} sections`);
+    } else {
+      console.error(`❌ Failed to rebuild FAISS index: ${result.error}`);
+    }
 
     return result;
 

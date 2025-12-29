@@ -1,5 +1,7 @@
 import mongoose from "mongoose";
 import dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
 import Case from "./models/caseModel.js";
 import Section from "./models/sectionModel.js";
 import { buildOrLoadIndex } from "./services/faissService.js";
@@ -32,7 +34,30 @@ const clearAndRebuild = async () => {
     const deletedCases = await Case.deleteMany({});
     console.log(`   Deleted ${deletedCases.deletedCount} cases`);
 
-    console.log(`\n✅ Database cleared successfully!`);
+    // Delete FAISS index files
+    console.log(`\n🗑️  Clearing FAISS vector database...`);
+    const faissFiles = [
+      'legal_index.faiss',
+      'legal_metadata.pkl',
+      path.join('python_scripts', 'legal_index.faiss'),
+      path.join('python_scripts', 'legal_metadata.pkl')
+    ];
+
+    let deletedFiles = 0;
+    for (const file of faissFiles) {
+      try {
+        if (fs.existsSync(file)) {
+          fs.unlinkSync(file);
+          console.log(`   Deleted ${file}`);
+          deletedFiles++;
+        }
+      } catch (err) {
+        console.log(`   ⚠️  Could not delete ${file}: ${err.message}`);
+      }
+    }
+    console.log(`   Deleted ${deletedFiles} FAISS files`);
+
+    console.log(`\n✅ Database and vector store cleared successfully!`);
     console.log(`\nℹ️  To rebuild the index:`);
     console.log(`   1. Upload new documents through the web interface`);
     console.log(`   2. Or run: node check_db.js to see current state`);
