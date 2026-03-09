@@ -47,163 +47,294 @@ export const searchQuestion = async (req, res) => {
     }
 
     // Find most relevant case using frequency + score tiebreaker
-    const caseCounter = {};
-    const caseBestScore = {};  // Track best score for each case
+    // Calculate weighted relevance score for each case
+    // Combines: (1) number of sections, (2) total relevance score, (3) best score
+    const caseStats = {};
     
-    console.log(`[searchQuestion] Counting cases from ${topSections.length} sections`);
+    console.log(`[searchQuestion] Analyzing ${topSections.length} sections for case selection`);
     topSections.forEach((sec, idx) => {
-      console.log(`[searchQuestion]   Section ${idx}: caseId = ${sec.caseId}, score = ${sec.score}`);
-      caseCounter[sec.caseId] = (caseCounter[sec.caseId] || 0) + 1;
-      caseBestScore[sec.caseId] = Math.max(caseBestScore[sec.caseId] || 0, sec.score || 0);
+      const caseId = sec.caseId;
+      if (!caseStats[caseId]) {
+        caseStats[caseId] = {
+          count: 0,
+          totalScore: 0,
+          bestScore: 0,
+          sections: []
+        };
+      }
+      caseStats[caseId].count += 1;
+      caseStats[caseId].totalScore += (sec.score || 0);
+      caseStats[caseId].bestScore = Math.max(caseStats[caseId].bestScore, sec.score || 0);
+      caseStats[caseId].sections.push({ index: idx, sectionId: sec.sectionId, score: sec.score });
+      
+      console.log(`[searchQuestion]   Section ${idx}: caseId = ${caseId}, score = ${sec.score?.toFixed(4)}`);
     });
 
-    console.log("[searchQuestion] Case counter:", JSON.stringify(caseCounter, null, 2));
-    console.log("[searchQuestion] Case best scores:", JSON.stringify(caseBestScore, null, 2));
-    console.log("[searchQuestion] topCases from FAISS:", topCases);
+    console.log("[searchQuestion] Case statistics:", JSON.stringify(caseStats, null, 2));
 
-    // Select case with highest frequency, use best score as tiebreaker
-    const mostCommonCaseId = Object.keys(caseCounter).reduce((a, b) => {
-      if (caseCounter[a] > caseCounter[b]) return a;
-      if (caseCounter[a] < caseCounter[b]) return b;
-      // Tie: use best score
-      return (caseBestScore[a] || 0) >= (caseBestScore[b] || 0) ? a : b;
+    // Sort cases by bestScore FIRST (highest match quality), then by count (frequency) as tiebreaker
+    // This ensures the case with the most relevant match appears first
+    const sortedCaseIds = Object.keys(caseStats).sort((a, b) => {
+      const statsA = caseStats[a];
+      const statsB = caseStats[b];
+      
+      // Primary sort: bestScore (descending - higher is better with similarity scores)
+      if (Math.abs(statsB.bestScore - statsA.bestScore) > 0.001) {
+        return statsB.bestScore - statsA.bestScore;
+      }
+      
+      // Tiebreaker 1: count (more matching sections)
+      if (statsB.count !== statsA.count) {
+        return statsB.count - statsA.count;
+      }
+      
+      // Tiebreaker 2: totalScore
+      return statsB.totalScore - statsA.totalScore;
     });
+    
+    const top3CaseIds = sortedCaseIds.slice(0, 3);
+    
+    console.log("[searchQuestion] Sorted cases by bestScore:", sortedCaseIds.map(caseId => ({
+      caseId,
+      bestScore: caseStats[caseId].bestScore.toFixed(4),
+      count: caseStats[caseId].count,
+      totalScore: caseStats[caseId].totalScore.toFixed(4)
+    })));
 
-    console.log(`[searchQuestion] Most relevant case (from counter): ${mostCommonCaseId}`);
+    console.log(`[searchQuestion] Selected top 3 cases (by composite score): ${top3CaseIds.join(', ')}`);
+    console.log("[searchQuestion] Top 5 sections used for answer:", topSections.slice(0, 5).map((s, idx) => ({
+      index: idx,
+      sectionId: s.sectionId,
+      caseId: s.caseId,
+      score: s.score?.toFixed(4)
+    })));
 
-    // Get case details
-    let selectedCase;
+    // Get case details with full text for all top 3 cases
+    const selectedCases = [];
     try {
-      selectedCase = await Case.findOne({ caseId: mostCommonCaseId });
-      if (!selectedCase) {
-        console.warn(`[searchQuestion] No case found for caseId: ${mostCommonCaseId}`);
+      for (const caseId of top3CaseIds) {
+        const caseDoc = await Case.findOne({ caseId });
+        console.log("[searchQuestion] MongoDB query result:", {
+          caseIdQueried: caseId,
+          foundCase: caseDoc ? {
+            caseId: caseDoc.caseId,
+            title: caseDoc.title,
+            year: caseDoc.metadata?.year,
+            hasFullText: !!caseDoc.fullText,
+            fullTextLength: caseDoc.fullText?.length || 0
+          } : null
+        });
+        if (caseDoc && caseDoc.fullText) {
+          selectedCases.push(caseDoc);
+        } else {
+          console.warn(`[searchQuestion] Case ${caseId} not found or has no fullText, skipping...`);
+        }
+      }
+      
+      if (selectedCases.length === 0) {
+        console.warn(`[searchQuestion] No valid cases found from top 3`);
+        return res.status(404).json({ error: "Selected cases not found in database" });
       }
     } catch (err) {
-      console.error(`[searchQuestion] Error fetching case details for caseId ${mostCommonCaseId}:`, err);
+      console.error(`[searchQuestion] Error fetching case details:`, err);
       return res.status(500).json({ error: "Case lookup failed", details: err.message });
     }
 
-    // Get top 5 sections from multiple cases for comprehensive answer
-    const relevantSections = topSections.slice(0, 5);
+    // Generate summaries for all selected cases
+    const caseSummaries = [];
+    
+    for (let i = 0; i < selectedCases.length; i++) {
+      const selectedCase = selectedCases[i];
+      const relevantSections = topSections.filter(s => s.caseId === selectedCase.caseId).slice(0, 5);
 
-    console.log("=== SECTIONS USED FOR SUMMARY ===");
-    relevantSections.forEach((section, index) => {
-      console.log(`Section ${index + 1}: ID = ${section.sectionId}, Case ID = ${section.caseId}, Score = ${section.score?.toFixed(4) || 'N/A'}`);
-    });
-    console.log("=================================");
+      console.log(`\n=== PROCESSING CASE ${i + 1} OF ${selectedCases.length} ===`);
+      console.log(`Case ID: ${selectedCase.caseId}`);
+      console.log(`Title: ${selectedCase.title}`);
+      console.log(`Court: ${selectedCase.metadata?.court || 'N/A'}`);
+      console.log(`Year: ${selectedCase.metadata?.year || 'N/A'}`);
+      console.log(`Full Text Length: ${selectedCase.fullText.length} characters`);
+      console.log(`Top Matching Sections: ${relevantSections.length}`);
+      relevantSections.forEach((section, index) => {
+        console.log(`  Section ${index + 1}: Score = ${section.score?.toFixed(4) || 'N/A'}`);
+      });
+      console.log("====================================");
 
-    // Build enriched context with case information for better question answering
-    const context = relevantSections.map((section, index) => {
-      return `=== RELEVANT CASE ${index + 1} ===
-Case ID: ${section.caseId}
-Relevance Score: ${section.score ? (section.score * 100).toFixed(1) + '%' : 'N/A'}
-Content: ${section.text}
-`;
-    }).join("\n\n");
-    console.log(`[searchQuestion] Context for Gemini (length: ${context.length}):`, context.slice(0, 200) + (context.length > 200 ? '...' : ''));
+      // Build context with FULL CASE TEXT (not just sections)
+      const context = `=== FULL CASE DOCUMENT ===
 
-    // Question-focused prompt that directly answers user queries
-    const prompt = `
-You are a Sri Lankan legal expert. Your ONLY job is to directly answer the user's specific question using the case law provided. 
+Case Title: ${selectedCase.title || 'Unknown'}
+Case Number: ${selectedCase.metadata?.caseNumber || 'N/A'}
+Court: ${selectedCase.metadata?.court || 'Unknown Court'}
+Year: ${selectedCase.metadata?.year || 'N/A'}
+Judges: ${Array.isArray(selectedCase.metadata?.judges) ? selectedCase.metadata.judges.join(', ') : 'N/A'}
+Case Type: ${selectedCase.metadata?.caseType || 'N/A'}
 
-**PRIMARY OBJECTIVE: ANSWER THE USER'S QUESTION FIRST AND FOREMOST**
+=== COMPLETE CASE TEXT ===
 
-**CRITICAL INSTRUCTIONS:**
-- Start with a direct answer to the user's question
-- Use ONLY the provided case law as evidence
-- Focus on practical, actionable guidance
-- Be specific about what the user should do or expect
-- Connect every piece of case law directly to the user's question
+${selectedCase.fullText}
 
-------------------------------------
-**USER'S SPECIFIC QUESTION:**
+=== END OF CASE ===`;
+
+      console.log(`\n=== FULL TEXT BEING SENT TO AI (Case ${i + 1}) ===`);
+      console.log(`Full Text Length: ${selectedCase.fullText.length} characters`);
+      console.log(`Full Text Preview (first 500 chars):\n${selectedCase.fullText.substring(0, 500)}...`);
+      console.log(`\nFull Text Preview (last 300 chars):\n...${selectedCase.fullText.substring(selectedCase.fullText.length - 300)}`);
+      console.log("====================================\n");
+      
+      console.log(`[searchQuestion] Full case context for Gemini (length: ${context.length} characters)`);
+      console.log(`[searchQuestion] Complete context being sent to AI:\n${context.substring(0, 800)}...\n...${context.substring(context.length - 300)}`);
+       
+      // Question-focused prompt that directly answers user queries with FULL CASE
+      const prompt = `
+You are a Sri Lankan legal reasoning assistant.
+
+ABSOLUTE RESTRICTION:
+You are permitted to rely ONLY on the SINGLE case document provided below.
+You must not use:
+- Outside legal knowledge
+- General Sri Lankan law
+- Other cases
+- Legal doctrines not expressly mentioned in this case
+- Assumptions or speculation
+
+If the answer is not clearly supported by this case,
+you MUST explicitly say:
+
+"The provided case does not clearly address this specific issue."
+
+You are performing JUDGMENT-BASED reasoning — not textbook explanation.
+
+==================================================
+USER QUESTION:
 "${question}"
+==================================================
 
-------------------------------------
-**RELEVANT CASE LAW:**
+CASE DOCUMENT PROVIDED:
 ${context}
 
-------------------------------------
-**REQUIRED RESPONSE FORMAT:**
+==================================================
 
-# 🎯 **DIRECT ANSWER TO YOUR QUESTION**
+MANDATORY ANALYTICAL STEPS:
 
-## ✅ **SHORT ANSWER:**
-Based on the case law provided: [Give a direct, clear answer to the user's question in 2-3 sentences]
+1. Read the FULL case carefully.
+2. Identify:
+   - Material facts relevant to the user’s question
+   - The precise legal issue decided by the court
+   - The court’s holding
+   - The reasoning (ratio decidendi)
+3. Ignore:
+   - Irrelevant background facts
+   - Procedural history unless relevant
+4. Do NOT:
+   - Add general explanations
+   - Expand principles beyond what the court actually states
+   - Convert the answer into a textbook discussion
 
-## 📖 **LEGAL BASIS FOR THIS ANSWER:**
-**Case(s) Used:** [Name the specific case(s)]
-**What Happened:** [Only the facts relevant to the user's question]
-**Court's Decision:** [Only the court ruling that relates to the user's question]
+If the facts of the user's question are materially different from the case,
+clearly explain the limitation.
 
-**Why This Applies to Your Question:** [Direct connection between case and user's situation]
+==================================================
 
----
+REQUIRED RESPONSE FORMAT
 
-## 💡 **WHAT THIS MEANS FOR YOU**
+🎯 DIRECT ANSWER
 
-**Practical Answer:**
-- [Specific guidance based on the case law]
-- [What you can expect in your situation]
-- [Your legal rights/position based on this precedent]
+✅ Short Answer  
+(Answer clearly in 2–4 sentences using ONLY what this case decides. 
+Do NOT use double asterisks anywhere.)
 
-**Action Steps:**
-- [Specific steps you should take]
-- [What evidence/documents you might need]
-- [Timeline considerations if any]
+───────────────────────────────────────────────
 
-**⚠️ Important Considerations:**
-- [Any limitations or differences from your exact situation]
-- [Factors that could change the outcome]
+📖 Legal Basis From This Case
 
----
+Case Name: (Use exact title from metadata)
+Court: (From metadata)
+Year: (From metadata)
+Citation: (If available)
 
-## 🔍 **IF YOUR SITUATION IS SIMILAR**
+Relevant Material Facts:  
+(Describe only facts necessary to understand the issue. 
+Write in plain paragraphs. No bold formatting.)
 
-**This Case Law Also Helps If:**
-- [List similar situations where this applies]
-- [Warning signs to watch for]
+Legal Issue Decided:  
+(State the precise issue the court determined.)
 
-**When This Wouldn't Apply:**
-- [Situations where this precedent doesn't help]  
-- [Different circumstances that would need different legal approach]
+Court’s Holding:  
+(State exactly what the court decided.)
 
----
+Reasoning (Ratio Decidendi):  
+(Explain the court’s reasoning strictly as derived from the judgment. 
+You may use single asterisks for case names.)
 
-**📌 DISCLAIMER:** This explanation is based solely on the provided case law context and should not be considered as legal advice. Always consult with a qualified lawyer for specific legal guidance.
+───────────────────────────────────────────────
 
-------------------------------------
-**FORMATTING RULES:**
-- Always use the exact heading structure shown above
-- Use emojis for visual appeal and clarity
-- Use bullet points, numbered lists, and bold text
-- Keep sentences short and clear
-- Use "you/your" to address the user directly
-- If context is insufficient, say: "⚠️ The provided context does not contain enough information about [specific topic], but here's what we can understand..."
+💡 Application To the User’s Question
+
+(Explain how the court’s holding would apply IF the user’s facts are materially similar.
+If factual similarity is unclear, state that explicitly.
+Do not speculate beyond the judgment.)
+
+If the case does not fully resolve the user’s scenario, clearly state:
+
+"This case may not fully apply if your factual situation differs in the following way: [explain based only on distinctions visible from the case]."
+
+───────────────────────────────────────────────
+
+⚠️ Limitation
+
+This answer is strictly and exclusively based on the single case provided above.
+No other legal sources have been considered.
+
+==================================================
+
+CRITICAL WRITING RULES:
+
+✓ Write in natural, professional legal prose  
+✓ No double asterisks (**) anywhere  
+✓ Single asterisks allowed only for case names  
+✓ No dramatic tone  
+✓ No extra commentary  
+✓ No textbook explanation  
+✓ No expansion beyond the judgment  
+
+Remember: You are simulating judicial reasoning, not giving general legal advice.
 `;
 
+      let summary;
+      try {
+        summary = await summarizeCase(prompt);
+        console.log(`[searchQuestion] Gemini summary for case ${i + 1}:`, summary?.slice(0, 200) + (summary?.length > 200 ? '...' : ''));
+      } catch (err) {
+        console.error(`[searchQuestion] summarizeCase threw error for case ${i + 1}:`, err);
+        summary = "Error generating summary for this case.";
+      }
 
-    let summary;
-    try {
-      summary = await summarizeCase(prompt);
-      console.log(`[searchQuestion] Gemini summary:`, summary?.slice(0, 200) + (summary?.length > 200 ? '...' : ''));
-    } catch (err) {
-      console.error("[searchQuestion] summarizeCase threw error:", err);
-      return res.status(500).json({ error: "summarizeCase failed", details: err.message });
+      caseSummaries.push({
+        caseInfo: {
+          caseId: selectedCase.caseId,
+          title: selectedCase.title,
+          court: selectedCase.metadata?.court,
+          year: selectedCase.metadata?.year,
+          citation: selectedCase.metadata?.citation,
+          caseNumber: selectedCase.metadata?.caseNumber,
+          caseType: selectedCase.metadata?.caseType,
+          judges: selectedCase.metadata?.judges,
+          fullTextLength: selectedCase.fullText?.length,
+          rank: i + 1
+        },
+        summary,
+        relevantSections
+      });
     }
 
     res.json({
-      topSections: relevantSections,
-      topCases: [mostCommonCaseId],
-      selectedCase: selectedCase ? {
-        caseId: selectedCase.caseId,
-        title: selectedCase.title,
-        court: selectedCase.metadata?.court,
-        year: selectedCase.metadata?.year,
-        citation: selectedCase.metadata?.citation
-      } : null,
-      summary,
-      searchMethod
+      topSections: caseSummaries[0]?.relevantSections || [],
+      topCases: top3CaseIds,
+      selectedCase: caseSummaries[0]?.caseInfo || null,
+      allCases: caseSummaries,
+      summary: caseSummaries[0]?.summary || "",
+      searchMethod,
+      message: "Answer based on top matching cases"
     });
   } catch (err) {
     console.error("[searchQuestion] Uncaught error:", err);

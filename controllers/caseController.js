@@ -1,5 +1,5 @@
 import { extractPDFContent, extractTextContent, storePDFContent, storeTextContent } from "../services/pdfService.js";
-import { buildOrLoadIndex } from "../services/faissService.js";
+import { buildOrLoadIndex, bulkAddToFaissIndex } from "../services/faissService.js";
 
 // New endpoint: Preview PDF content before storing
 export const previewPDF = async (req, res) => {

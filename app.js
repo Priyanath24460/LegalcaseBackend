@@ -1,14 +1,14 @@
+// Load config FIRST - this imports dotenv and runs config() before anything else
+import "./config.js";
+
 import express from "express";
 import cors from "cors";
 import mongoose from "mongoose";
-import dotenv from "dotenv";
 
 import caseRoute from "./routes/caseRoute.js";
 import queryRoute from "./routes/queryRoute.js";
 import geminiTestRoute from "./routes/geminiTestRoute.js";
 import testMetadataRoute from "./routes/testMetadataRoute.js";
-
-dotenv.config();
 
 const app = express();
 

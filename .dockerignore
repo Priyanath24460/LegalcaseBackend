@@ -1,0 +1,8 @@
+node_modules
+npm-debug.log
+.env
+.git
+python_scripts
+__pycache__
+*.pyc
+*.log

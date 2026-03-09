@@ -18,6 +18,7 @@ import Section from "../models/sectionModel.js";
 import Case from "../models/caseModel.js";
 import { generateEmbedding } from "./embeddingService.js";
 import { extractMetadataWithAI } from "./geminiService.js";
+import { bulkAddToFaissIndex } from "./faissService.js";
 import mongoose from "mongoose";
 
 // Extract text content directly (for pasted text)
@@ -372,6 +373,8 @@ export const storePDFContent = async (filePath, filename, approvedMetadata = nul
     console.log(`- Case Type: ${finalMetadata.caseType}`);
 
     // Store sections with embeddings
+    const createdSections = []; // Track created sections for bulk FAISS update
+    
     for (let i = 0; i < extractedData.sections.length; i++) {
       console.log(`Processing section ${i + 1}/${extractedData.sections.length}...`);
       console.log(`Section ${i + 1} text length: ${extractedData.sections[i].text.length} characters`);
@@ -405,6 +408,9 @@ export const storePDFContent = async (filePath, filename, approvedMetadata = nul
           const createdSection = await Section.create(sectionData);
           console.log(`✅ Section ${i + 1} created successfully with ID: ${createdSection._id}`);
           console.log(`✅ Section saved: ${createdSection.sectionId}`);
+          
+          // Add to list for bulk FAISS update
+          createdSections.push(createdSection);
         } catch (createError) {
           console.error(`❌ Failed to create section ${i + 1} in database:`, createError.message);
           console.error(`❌ Section data that failed:`, JSON.stringify(sectionData, null, 2));
@@ -432,6 +438,9 @@ export const storePDFContent = async (filePath, filename, approvedMetadata = nul
 
           const fallbackSection = await Section.create(fallbackSectionData);
           console.log(`✅ Fallback section ${i + 1} created with ID: ${fallbackSection._id}`);
+          
+          // Add to list for bulk FAISS update (even with dummy embedding)
+          createdSections.push(fallbackSection);
         } catch (fallbackError) {
           console.error(`❌ Even fallback section creation failed:`, fallbackError.message);
           throw fallbackError;
@@ -440,6 +449,13 @@ export const storePDFContent = async (filePath, filename, approvedMetadata = nul
     }
 
     console.log(`✅ Successfully processed PDF: ${filename}`);
+    
+    // Bulk add all sections to FAISS index
+    if (createdSections.length > 0) {
+      console.log(`📤 Adding ${createdSections.length} sections to FAISS index...`);
+      await bulkAddToFaissIndex(createdSections);
+    }
+    
     return caseId;
     
   } catch (error) {
@@ -493,6 +509,8 @@ export const storeTextContent = async (text, filename, approvedMetadata = null) 
     console.log(`- Case Type: ${finalMetadata.caseType}`);
 
     // Store sections with embeddings
+    const createdSections = []; // Track created sections for bulk FAISS update
+    
     for (let i = 0; i < extractedData.sections.length; i++) {
       console.log(`Processing section ${i + 1}/${extractedData.sections.length}...`);
       console.log(`Section ${i + 1} text length: ${extractedData.sections[i].text.length} characters`);
@@ -526,6 +544,9 @@ export const storeTextContent = async (text, filename, approvedMetadata = null) 
           const createdSection = await Section.create(sectionData);
           console.log(`✅ Section ${i + 1} created successfully with ID: ${createdSection._id}`);
           console.log(`✅ Section saved: ${createdSection.sectionId}`);
+          
+          // Add to list for bulk FAISS update
+          createdSections.push(createdSection);
         } catch (createError) {
           console.error(`❌ Failed to create section ${i + 1} in database:`, createError.message);
           console.error(`❌ Section data that failed:`, JSON.stringify(sectionData, null, 2));
@@ -553,6 +574,9 @@ export const storeTextContent = async (text, filename, approvedMetadata = null) 
 
           const fallbackSection = await Section.create(fallbackSectionData);
           console.log(`✅ Fallback section ${i + 1} created with ID: ${fallbackSection._id}`);
+          
+          // Add to list for bulk FAISS update (even with dummy embedding)
+          createdSections.push(fallbackSection);
         } catch (fallbackError) {
           console.error(`❌ Even fallback section creation failed:`, fallbackError.message);
           throw fallbackError;
@@ -561,6 +585,13 @@ export const storeTextContent = async (text, filename, approvedMetadata = null) 
     }
 
     console.log(`✅ Successfully processed text content: ${filename}`);
+    
+    // Bulk add all sections to FAISS index
+    if (createdSections.length > 0) {
+      console.log(`📤 Adding ${createdSections.length} sections to FAISS index...`);
+      await bulkAddToFaissIndex(createdSections);
+    }
+    
     return caseId;
     
   } catch (error) {

@@ -1,5 +1,5 @@
 import Section from "../models/sectionModel.js";
-import { PythonShell } from "python-shell";
+import { spawn } from "child_process";
 import path from "path";
 import fs from "fs";
 import axios from "axios";
@@ -7,7 +7,31 @@ import { generateEmbedding } from "./embeddingService.js";
 
 const FAISS_INDEX_PATH = process.env.FAISS_INDEX_PATH || "legal_index.faiss";
 const FAISS_METADATA_PATH = process.env.FAISS_METADATA_PATH || "legal_metadata.pkl";
-const FAISS_SERVICE_URL = process.env.FAISS_SERVICE_URL || "http://127.0.0.1:8001/search";
+
+/**
+ * Get the FAISS service URL from environment at runtime
+ */
+const getFaissServiceUrl = () => {
+  return process.env.FAISS_SERVICE_URL || "http://127.0.0.1:8001";
+};
+
+/**
+ * Get the base URL without /search endpoint
+ */
+const getFaissBaseUrl = () => {
+  const url = getFaissServiceUrl();
+  // Remove /search if it exists
+  return url.replace(/\/search$/, '');
+};
+
+// Log once at first use
+let hasFaissLogged = false;
+const logFaissUrl = () => {
+  if (!hasFaissLogged) {
+    console.log("🌐 FAISS_SERVICE_URL:", getFaissServiceUrl());
+    hasFaissLogged = true;
+  }
+};
 
 // Helper function to run Python FAISS operations
 const runPythonFAISS = async (operation, data = null) => {
@@ -15,53 +39,92 @@ const runPythonFAISS = async (operation, data = null) => {
     const scriptPath = path.join(process.cwd(), "python_scripts", "faiss_operations.py");
     const pythonPath = process.env.PYTHON_PATH || "python";
 
-    const args = [operation];
+    const args = ["-u", scriptPath, operation];
 
     // For operations with large data, write to temp file
     let tempFilePath = null;
-    if (data && (operation === 'build' || operation === 'search' || operation === 'add_incremental')) {
+    if (data && (operation === 'build' || operation === 'rebuild' || operation === 'search' || operation === 'add_incremental')) {
       tempFilePath = path.join(process.cwd(), `temp_${operation}_${Date.now()}.json`);
       console.log(`Writing data to temp file: ${tempFilePath}`);
-      fs.writeFileSync(tempFilePath, JSON.stringify(data));
+      fs.writeFileSync(tempFilePath, JSON.stringify(data), 'utf8');
       console.log(`Temp file written, size: ${fs.statSync(tempFilePath).size} bytes`);
       args.push(tempFilePath);
     } else if (data) {
       args.push(JSON.stringify(data));
     }
 
-    const options = {
-      mode: 'text',
-      pythonPath: pythonPath,
-      pythonOptions: ['-u'],
-      scriptPath: path.dirname(scriptPath),
-      args: args
-    };
+    console.log(`Executing: ${pythonPath} ${args.join(' ')}`);
 
-    PythonShell.run(path.basename(scriptPath), options, (err, results) => {
+    const pythonProcess = spawn(pythonPath, args);
+    
+    let stdoutData = '';
+    let stderrData = '';
+
+    pythonProcess.stdout.on('data', (data) => {
+      stdoutData += data.toString();
+    });
+
+    pythonProcess.stderr.on('data', (data) => {
+      stderrData += data.toString();
+      console.error(`[Python stderr]: ${data.toString()}`);
+    });
+
+    pythonProcess.on('close', (code) => {
       // Clean up temp file
       if (tempFilePath && fs.existsSync(tempFilePath)) {
         fs.unlinkSync(tempFilePath);
       }
 
-      if (err) {
-        console.error("Python script error:", err);
-        reject(err);
+      if (code !== 0) {
+        console.error(`Python process exited with code ${code}`);
+        console.error(`stderr: ${stderrData}`);
+        reject(new Error(`Python script failed with exit code ${code}`));
         return;
       }
 
       try {
-        const result = JSON.parse(results[0]);
+        const result = JSON.parse(stdoutData.trim());
         if (result.success) {
           resolve(result);
         } else {
           reject(new Error(result.error));
         }
       } catch (parseErr) {
-        console.error("Failed to parse Python output:", results);
+        console.error("Failed to parse Python output:", stdoutData);
+        console.error("Parse error:", parseErr);
         reject(parseErr);
       }
     });
+
+    pythonProcess.on('error', (err) => {
+      // Clean up temp file
+      if (tempFilePath && fs.existsSync(tempFilePath)) {
+        fs.unlinkSync(tempFilePath);
+      }
+      console.error("Failed to start Python process:", err);
+      reject(err);
+    });
   });
+};
+
+/**
+ * Ping FAISS service to wake it up (Render cold start)
+ */
+const wakeUpFaissService = async () => {
+  try {
+    const baseUrl = getFaissBaseUrl();
+    console.log("🔔 Pinging FAISS service to wake it up...");
+    
+    await axios.get(`${baseUrl}/health`, { 
+      timeout: 120000 // 2 minutes for cold start
+    });
+    
+    console.log("✅ FAISS service is awake");
+    return true;
+  } catch (error) {
+    console.log("⚠️ FAISS service wake-up failed:", error.message);
+    return false;
+  }
 };
 
 export const buildOrLoadIndex = async () => {
@@ -75,55 +138,168 @@ export const buildOrLoadIndex = async () => {
     }
 
     console.log(`Found ${allSections.length} sections in MongoDB`);
-
-    // Check how many are currently in FAISS index
-    let currentIndexCount = 0;
-    if (fs.existsSync(FAISS_METADATA_PATH)) {
-      try {
-        // Use Python to read the pickle file
-        const checkResult = await runPythonFAISS("load");
-        if (checkResult.success) {
-          currentIndexCount = checkResult.count;
-          console.log(`Current FAISS index has ${currentIndexCount} sections`);
-        }
-      } catch (error) {
-        console.log("Could not read existing index count");
-      }
-    }
-
-    // If counts match, index is up to date
-    if (currentIndexCount === allSections.length) {
-      console.log("✅ FAISS index is up to date with all MongoDB sections");
-      return { success: true, message: "Index is up to date", count: allSections.length };
-    }
-
-    // Otherwise, rebuild from scratch to ensure consistency
-    console.log(`⚠️ MongoDB has ${allSections.length} sections but FAISS has ${currentIndexCount}`);
-    console.log("🔄 Rebuilding FAISS index from scratch to sync all sections...");
-
-    // Prepare all embeddings data for complete rebuild
-    const allEmbeddingsData = allSections.map(section => ({
-      embedding: section.embedding,
-      sectionId: section.sectionId,
-      caseId: section.caseId,
-      text: section.text
-    }));
-
-    console.log(`🧠 Building FAISS index with ${allSections.length} sections...`);
-    const result = await runPythonFAISS("rebuild", allEmbeddingsData);
     
-    if (result.success) {
-      console.log(`✅ FAISS index rebuilt successfully with ${result.count} sections`);
-    } else {
-      console.error(`❌ Failed to rebuild FAISS index: ${result.error}`);
+    // Wake up FAISS service first
+    await wakeUpFaissService();
+    
+    // Check current FAISS index status
+    try {
+      const baseUrl = getFaissBaseUrl();
+      const statusResponse = await axios.get(`${baseUrl}/status`, { timeout: 30000 });
+      const faissCount = statusResponse.data.document_count || 0;
+      
+      console.log(`📊 FAISS index has ${faissCount} documents, MongoDB has ${allSections.length}`);
+      
+      if (faissCount === allSections.length) {
+        console.log("✅ FAISS index is already up to date");
+        return { 
+          success: true, 
+          message: "Index is up to date", 
+          count: allSections.length 
+        };
+      }
+      
+      // Rebuild index with all documents
+      console.log("🔄 Rebuilding FAISS index to sync with MongoDB...");
+      const documents = allSections.map(section => ({
+        embedding: section.embedding,
+        section_id: section.sectionId,
+        case_id: section.caseId,
+        text: section.text
+      }));
+      
+      const rebuildResponse = await axios.post(`${baseUrl}/rebuild`, 
+        { documents },
+        { timeout: 180000 } // 3 minutes for rebuild (larger operations)
+      );
+      
+      if (rebuildResponse.data.success) {
+        console.log(`✅ FAISS index rebuilt successfully with ${rebuildResponse.data.total_count} documents`);
+        return { 
+          success: true, 
+          message: "Index rebuilt successfully", 
+          count: rebuildResponse.data.total_count 
+        };
+      }
+      
+    } catch (error) {
+      console.error("⚠️ Error updating FAISS index:", error.message);
+      console.log("💡 Documents are saved to MongoDB. FAISS may need manual sync.");
     }
-
-    return result;
+    
+    return { 
+      success: true, 
+      message: "Sections saved to MongoDB", 
+      count: allSections.length 
+    };
 
   } catch (error) {
     console.error("Error in buildOrLoadIndex:", error);
-    throw error;
+    // Don't throw error - allow document upload to succeed even if index check fails
+    return { 
+      success: true, 
+      message: "Sections saved. Index check skipped.", 
+      count: 0 
+    };
   }
+};
+
+/**
+ * Add a single section to FAISS index
+ * @param {Object} section - Section object with embedding, sectionId, caseId, text
+ */
+export const addToFaissIndex = async (section) => {
+  try {
+    const baseUrl = getFaissBaseUrl();
+    console.log(`📤 Adding section to FAISS: ${section.sectionId}`);
+    
+    const response = await axios.post(`${baseUrl}/add`, {
+      embedding: section.embedding,
+      section_id: section.sectionId,
+      case_id: section.caseId,
+      text: section.text
+    }, {
+      timeout: 30000
+    });
+    
+    if (response.data.success) {
+      console.log(`✅ Added to FAISS index. Total: ${response.data.total_count}`);
+      return true;
+    }
+    
+    return false;
+  } catch (error) {
+    console.error(`⚠️ Failed to add to FAISS index: ${error.message}`);
+    // Don't throw - allow document upload to continue even if FAISS update fails
+    return false;
+  }
+};
+
+/**
+ * Add multiple sections to FAISS index at once (with retry logic)
+ * @param {Array} sections - Array of section objects
+ */
+export const bulkAddToFaissIndex = async (sections) => {
+  // Run asynchronously - don't block document upload
+  setImmediate(async () => {
+    const maxRetries = 3;
+    let attempt = 0;
+    
+    while (attempt < maxRetries) {
+      try {
+        attempt++;
+        const baseUrl = getFaissBaseUrl();
+        console.log(`📤 Bulk adding ${sections.length} sections to FAISS (attempt ${attempt}/${maxRetries})`);
+        
+        // Wake up service first (important for Render cold starts)
+        if (attempt === 1) {
+          const isAwake = await wakeUpFaissService();
+          if (!isAwake) {
+            console.log("⚠️ FAISS service not responding, waiting before retry...");
+            await new Promise(resolve => setTimeout(resolve, 10000)); // Wait 10s
+            continue;
+          }
+        }
+        
+        const documents = sections.map(section => ({
+          embedding: section.embedding,
+          section_id: section.sectionId,
+          case_id: section.caseId,
+          text: section.text
+        }));
+        
+        const response = await axios.post(`${baseUrl}/bulk-add`, {
+          documents
+        }, {
+          timeout: 60000 // 1 minute (service should be warm now)
+        });
+        
+        if (response.data.success) {
+          console.log(`✅ Bulk added ${response.data.added_count} sections. Total: ${response.data.total_count}`);
+          return true;
+        }
+        
+        return false;
+      } catch (error) {
+        console.error(`⚠️ Attempt ${attempt} failed: ${error.message}`);
+        
+        if (attempt < maxRetries) {
+          const delay = attempt * 15000; // 15s, 30s
+          console.log(`⏳ Waiting ${delay/1000}s before retry...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          console.error(`❌ Failed to bulk add to FAISS after ${maxRetries} attempts`);
+          console.log("💡 Documents are in MongoDB. FAISS will sync on next search or manual rebuild.");
+        }
+      }
+    }
+    
+    return false;
+  });
+  
+  // Return immediately - don't wait for FAISS
+  console.log("📤 FAISS update initiated in background (non-blocking)");
+  return true;
 };
 
 /**
@@ -153,12 +329,14 @@ export const searchCases = async (query, topK = 10) => {
 
     // Try FAISS search first
     try {
+      logFaissUrl(); // Log on first use
       console.log("Performing FAISS search...");
-      const response = await axios.post(FAISS_SERVICE_URL, {
+      const baseUrl = getFaissBaseUrl();
+      const response = await axios.post(`${baseUrl}/search`, {
         embedding: queryEmbedding,
         top_k: topK
       }, {
-        timeout: 30000 // 30 seconds timeout
+        timeout: 90000 // 90 seconds timeout for Render cold starts
       });
 
       if (response.data && response.data.success && response.data.topSections?.length > 0) {
@@ -204,10 +382,11 @@ const hybridSearch = async (query, topK = 10) => {
     // Get semantic results from FAISS
     let semanticResults = [];
     try {
-      const response = await axios.post(FAISS_SERVICE_URL, {
+      const baseUrl = getFaissBaseUrl();
+      const response = await axios.post(`${baseUrl}/search`, {
         embedding: await generateEmbedding(query),
         top_k: topK * 2 // Get more results for reranking
-      }, { timeout: 30000 });
+      }, { timeout: 90000 }); // 90 seconds timeout for Render cold starts
 
       if (response.data?.success) {
         semanticResults = response.data.topSections || [];
