@@ -347,7 +347,7 @@ export const rankCasesRelevance = async (question, topCases) => {
     });
 
     // Build the ranking prompt
-    const rankingPrompt = `You are a legal expert evaluator. Your task is to assess which of the 3 cases below BEST answers the user's legal question.
+   const rankingPrompt = `You are a legal expert evaluator. Your task is to determine which of the following cases BEST answers the user's legal question.
 
 USER'S QUESTION:
 "${question}"
@@ -365,31 +365,56 @@ CASE ${idx + 1}:
 - Case ID: ${c.caseId}
 `).join('\n')}
 
-===== EVALUATION CRITERIA =====
+===== CORE LEGAL EVALUATION PRINCIPLES =====
 
-For each case, consider:
-1. DIRECT RELEVANCE: Does this case directly address the legal issue in the question?
-2. APPLICABLE LAW: Does this case apply the law that would apply to the user's situation?
-3. FACTUAL SIMILARITY: Are the facts similar enough that the court's reasoning would apply?
-4. CLARITY: Does this case provide clear guidance for answering the user's question?
+You MUST evaluate cases based on LEGAL RELEVANCE, not just keyword similarity.
+
+Apply the following criteria in order of importance:
+
+1. LEGAL ISSUE / INTENT MATCH (HIGHEST PRIORITY)
+   - What is the user asking? (e.g., injunction, liability, compensation, appeal, criminal guilt, rights)
+   - Does the case address the SAME legal issue or question?
+   - Cases answering a DIFFERENT legal issue must be ranked LOWER.
+
+2. REMEDY OR OUTCOME RELEVANCE
+   - Does the case discuss the legal remedy or outcome the user is seeking?
+   - Examples: stopping an action, awarding damages, criminal conviction, contract enforcement
+
+3. STAGE / CONTEXT MATCH
+   - Does the case match the situation stage?
+     (e.g., preventing an action vs dealing with consequences after it happened)
+
+4. DIRECT ANSWER CAPABILITY
+   - Can this case directly help answer the user's question?
+
+5. APPLICABLE LAW
+
+6. FACTUAL SIMILARITY (LOWEST PRIORITY)
+   - Similar facts alone are NOT enough if the legal issue is different
+
+IMPORTANT RULES:
+- DO NOT rank based only on shared keywords.
+- ALWAYS prefer cases that match the legal issue and remedy, even if facts are less similar.
+- Cases dealing with a different legal question must be ranked lower.
+- Think like a judge deciding which precedent is most useful.
 
 ===== YOUR TASK =====
 
-Rank the 3 cases from MOST relevant to LEAST relevant by rating each on a scale of 0-100%.
+Rate each case from 0-100 based on how well it answers the user's question using the above principles.
 
-RESPOND in this EXACT format (no other text, NO explanations):
+RESPOND in this EXACT format (no extra text):
 
 CASE_1_ID: [CaseID]
 CASE_1_SCORE: [0-100]%
-CASE_1_REASON: [1 sentence why this is the best/worst match]
+CASE_1_REASON: [1 short sentence explaining relevance based on legal issue]
 
 CASE_2_ID: [CaseID]
 CASE_2_SCORE: [0-100]%
-CASE_2_REASON: [1 sentence]
+CASE_2_REASON: [1 short sentence]
 
 CASE_3_ID: [CaseID]
 CASE_3_SCORE: [0-100]%
-CASE_3_REASON: [1 sentence]
+CASE_3_REASON: [1 short sentence]
 
 Then rank them by score (highest first):
 RANKED_ORDER: [CaseID1, CaseID2, CaseID3]`;
