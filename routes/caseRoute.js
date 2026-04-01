@@ -1,6 +1,6 @@
 import express from "express";
 import multer from "multer";
-import { uploadPDF, previewPDF, previewText, confirmPDF } from "../controllers/caseController.js";
+import { uploadPDF, previewPDF, previewText, confirmPDF, rebuildFAISSIndex } from "../controllers/caseController.js";
 
 const router = express.Router();
 const upload = multer({ dest: "uploads/" });
@@ -9,6 +9,9 @@ const upload = multer({ dest: "uploads/" });
 router.post("/preview", upload.single("pdf"), previewPDF);
 router.post("/preview-text", previewText);
 router.post("/confirm", confirmPDF);
+
+// Admin endpoint: Manual FAISS index rebuild
+router.post("/rebuild-faiss", rebuildFAISSIndex);
 
 // Original upload endpoint (backward compatibility)
 router.post("/upload", upload.single("pdf"), uploadPDF);

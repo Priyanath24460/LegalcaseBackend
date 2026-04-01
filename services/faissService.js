@@ -130,7 +130,7 @@ const wakeUpFaissService = async () => {
 export const buildOrLoadIndex = async () => {
   try {
     console.log("📚 Fetching all sections from MongoDB...");
-    const allSections = await Section.find({}).sort({ createdAt: 1 }); // Sort by creation time
+    const allSections = await Section.find({}).sort({ createdAt: 1 }).allowDiskUse(true); // Sort by creation time, allow disk use
 
     if (allSections.length === 0) {
       console.log("No sections found in database - skipping index build");

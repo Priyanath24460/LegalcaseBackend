@@ -116,15 +116,8 @@ export const confirmPDF = async (req, res) => {
       caseId = await storePDFContent(filePath, fileName, approvedMetadata);
     }
 
-    // Build or update FAISS index after successful upload
-    try {
-      console.log("Building FAISS index after document confirmation...");
-      await buildOrLoadIndex();
-      console.log("✅ FAISS index updated successfully");
-    } catch (indexError) {
-      console.error("⚠️ FAISS index build failed, but document was uploaded:", indexError.message);
-      // Don't fail the upload if index building fails
-    }
+    // FAISS index rebuild is now manual - admin will click button to rebuild in bulk
+    console.log("✅ Document confirmed and stored. Click 'Update FAISS Index' button to rebuild index.");
 
     res.json({ 
       message: isTextInput ? "Text content confirmed and stored successfully" : "PDF confirmed and stored successfully", 
@@ -148,19 +141,43 @@ export const uploadPDF = async (req, res) => {
     // Store immediately (no preview)
     const caseId = await storePDFContent(file.path, file.originalname);
 
-    // Build or update FAISS index after successful upload
-    try {
-      console.log("Building FAISS index after document upload...");
-      await buildOrLoadIndex();
-      console.log("✅ FAISS index updated successfully");
-    } catch (indexError) {
-      console.error("⚠️ FAISS index build failed, but document was uploaded:", indexError.message);
-      // Don't fail the upload if index building fails
-    }
+    // FAISS index rebuild is now manual - admin will click button to rebuild in bulk
+    console.log("✅ Document uploaded. Click 'Update FAISS Index' button to rebuild index.");
 
-    res.json({ message: "PDF uploaded and indexed", caseId });
+    res.json({ message: "PDF uploaded successfully", caseId });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Upload failed" });
+  }
+};
+
+// New endpoint: Manual FAISS index rebuild (for admin)
+export const rebuildFAISSIndex = async (req, res) => {
+  try {
+    // Check if admin authentication is in place (you can add middleware for this)
+    console.log("🔨 Admin triggered FAISS index rebuild...");
+    
+    const result = await buildOrLoadIndex();
+    
+    if (result.success) {
+      res.json({ 
+        success: true, 
+        message: "FAISS index rebuilt successfully", 
+        documentCount: result.count,
+        timestamp: new Date().toISOString()
+      });
+    } else {
+      res.status(400).json({ 
+        success: false, 
+        message: result.message 
+      });
+    }
+  } catch (err) {
+    console.error('Error rebuilding FAISS index:', err);
+    res.status(500).json({ 
+      success: false, 
+      error: "FAISS index rebuild failed", 
+      details: err.message 
+    });
   }
 };

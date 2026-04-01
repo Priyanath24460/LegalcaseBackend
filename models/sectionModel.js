@@ -44,6 +44,8 @@ const sectionSchema = new mongoose.Schema({
 // Index for faster searching
 sectionSchema.index({ caseId: 1 });
 sectionSchema.index({ sectionNumber: 1 });
+// Add index for createdAt to support efficient sorting and prevent memory errors
+sectionSchema.index({ createdAt: 1 });
 
 const Section = mongoose.model("Section", sectionSchema);
 export default Section;
