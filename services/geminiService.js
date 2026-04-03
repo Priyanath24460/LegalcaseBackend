@@ -1,32 +1,133 @@
 import axios from "axios";
-import dotenv from "dotenv";
-dotenv.config();
+import config from "../config.js";
 
-const callGeminiAPI = async (promptText) => {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
-  const payload = { contents: [{ parts: [{ text: promptText }] }] };
+// Multi-key rotation state
+let currentKeyIndex = 0;
+const failedKeys = new Set();
+const keyTimestamps = {}; // Track when keys hit rate limits
+
+// Initialize timestamps for all keys
+config.geminiApiKeys.forEach((_, i) => {
+  keyTimestamps[i] = null;
+});
+
+/**
+ * Check if a key is still in cooldown after hitting rate limit
+ * @param {number} keyIndex - Index of the key
+ * @param {number} cooldownMinutes - Cooldown period in minutes
+ * @returns {boolean} - True if key is still in cooldown
+ */
+const isKeyInCooldown = (keyIndex, cooldownMinutes = 60) => {
+  const timestamp = keyTimestamps[keyIndex];
+  if (!timestamp) return false;
   
-  if (!process.env.GEMINI_API_KEY) {
-    console.error("[Gemini] GEMINI_API_KEY is not set in environment variables.");
-    return "⚠️ Gemini API key is missing on the server.";
+  const elapsedMinutes = (Date.now() - timestamp) / (1000 * 60);
+  return elapsedMinutes < cooldownMinutes;
+};
+
+/**
+ * Get the next available API key
+ * @returns {string|null} - Next API key or null if all failed
+ */
+const getNextApiKey = () => {
+  if (!config.geminiApiKeys || config.geminiApiKeys.length === 0) {
+    console.error("[Gemini] No API keys configured");
+    return null;
   }
 
-  const res = await axios.post(url, payload);
-  console.log("[Gemini] Full API response:", JSON.stringify(res.data, null, 2));
+  const keys = config.geminiApiKeys;
+  let attempts = 0;
+
+  while (attempts < keys.length) {
+    const key = keys[currentKeyIndex];
+    
+    if (!isKeyInCooldown(currentKeyIndex)) {
+      console.log(`[Gemini] Using API key ${currentKeyIndex + 1}/${keys.length}`);
+      return key;
+    } else {
+      console.log(`[Gemini] Key ${currentKeyIndex + 1} is in cooldown, trying next...`);
+      currentKeyIndex = (currentKeyIndex + 1) % keys.length;
+      attempts++;
+    }
+  }
+
+  console.warn("[Gemini] ⚠ All API keys are in cooldown. Waiting...");
+  return config.geminiApiKeys[currentKeyIndex];
+};
+
+/**
+ * Mark a key as failed due to rate limit
+ * @param {number} keyIndex - Index of the failed key
+ */
+const markKeyAsRateLimited = (keyIndex) => {
+  keyTimestamps[keyIndex] = Date.now();
+  console.warn(`[Gemini] Key ${keyIndex + 1} hit rate limit, marked for cooldown`);
+};
+
+/**
+ * Rotate to the next key
+ */
+const rotateKey = () => {
+  currentKeyIndex = (currentKeyIndex + 1) % config.geminiApiKeys.length;
+  console.log(`[Gemini] Rotated to key ${currentKeyIndex + 1}/${config.geminiApiKeys.length}`);
+};
+
+const callGeminiAPI = async (promptText, retryCount = 0) => {
+  const maxRetries = config.geminiApiKeys.length;
   
-  if (
-    res.data &&
-    res.data.candidates &&
-    res.data.candidates[0] &&
-    res.data.candidates[0].content &&
-    res.data.candidates[0].content.parts &&
-    res.data.candidates[0].content.parts[0] &&
-    typeof res.data.candidates[0].content.parts[0].text === "string"
-  ) {
-    return res.data.candidates[0].content.parts[0].text;
-  } else {
-    console.error("[Gemini] Unexpected response structure:", JSON.stringify(res.data, null, 2));
-    return "⚠️ Gemini API returned an unexpected response format.";
+  if (retryCount >= maxRetries) {
+    console.error("[Gemini] All API keys exhausted or in cooldown");
+    return "⚠️ All Gemini API keys are rate limited. Please try again later.";
+  }
+
+  const apiKey = getNextApiKey();
+  if (!apiKey) {
+    return "⚠️ Gemini API keys are not configured properly.";
+  }
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${apiKey}`;
+  const payload = { contents: [{ parts: [{ text: promptText }] }] };
+
+  try {
+    const res = await axios.post(url, payload);
+    console.log("[Gemini] Full API response:", JSON.stringify(res.data, null, 2));
+    
+    if (
+      res.data &&
+      res.data.candidates &&
+      res.data.candidates[0] &&
+      res.data.candidates[0].content &&
+      res.data.candidates[0].content.parts &&
+      res.data.candidates[0].content.parts[0] &&
+      typeof res.data.candidates[0].content.parts[0].text === "string"
+    ) {
+      return res.data.candidates[0].content.parts[0].text;
+    } else {
+      console.error("[Gemini] Unexpected response structure:", JSON.stringify(res.data, null, 2));
+      return "⚠️ Gemini API returned an unexpected response format.";
+    }
+  } catch (err) {
+    if (err.response) {
+      const status = err.response.status;
+      
+      // Handle rate limit (429)
+      if (status === 429) {
+        console.warn(`[Gemini] 🔴 Rate limit hit on key ${currentKeyIndex + 1}. Error:`, err.response.data);
+        markKeyAsRateLimited(currentKeyIndex);
+        rotateKey();
+        
+        // Retry with next key
+        console.log("[Gemini] Retrying with next API key...");
+        return callGeminiAPI(promptText, retryCount + 1);
+      }
+      
+      // Handle other API errors
+      console.error(`[Gemini] API error (${status}):`, err.response.data);
+      throw err;
+    } else {
+      console.error("[Gemini] Request failed:", err.message);
+      throw err;
+    }
   }
 };
 
@@ -38,7 +139,7 @@ export const summarizeCase = async (promptText) => {
       console.error("[Gemini] API error:", err.response.status, err.response.data);
       return `⚠️ Gemini API error: ${err.response.status} - ${JSON.stringify(err.response.data)}`;
     } else {
-      console.error("[Gemini] Request failed:", err);
+      console.error("[Gemini] Request failed:", err.message);
       return "⚠️ Gemini API request failed.";
     }
   }

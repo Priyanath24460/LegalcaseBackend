@@ -6,7 +6,11 @@ dotenv.config();
 export default {
   mongoUri: process.env.MONGO_URI,
   dbName: process.env.DB_NAME,
-  geminiApiKey: process.env.GEMINI_API_KEY,
+  geminiApiKeys: [
+    process.env.GEMINI_API_KEY_1,
+    process.env.GEMINI_API_KEY_2,
+    process.env.GEMINI_API_KEY_3
+  ].filter(key => key), // Only include defined keys
   embeddingServiceUrl: process.env.EMBEDDING_SERVICE_URL,
   faissServiceUrl: process.env.FAISS_SERVICE_URL,
   pythonPath: process.env.PYTHON_PATH,

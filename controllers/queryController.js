@@ -97,34 +97,81 @@ export const searchQuestion = async (req, res) => {
 
     console.log("[searchQuestion] Case statistics:", JSON.stringify(caseStats, null, 2));
 
-    // Get the top 3 candidate cases first
-    const initialTop3CaseIds = Object.keys(caseStats)
-      .map(caseId => ({
-        caseId,
-        bestScore: caseStats[caseId].bestScore,
-        count: caseStats[caseId].count,
-        totalScore: caseStats[caseId].totalScore
-      }))
-      .sort((a, b) => {
-        if (Math.abs(b.bestScore - a.bestScore) > 0.001) {
-          return b.bestScore - a.bestScore;
-        }
-        if (b.count !== a.count) {
-          return b.count - a.count;
-        }
-        return b.totalScore - a.totalScore;
-      })
-      .slice(0, 3)
-      .map(item => item.caseId);
+    // ✅ IMPROVED: Multi-factor weighted scoring algorithm
+    /**
+     * Calculate relevance score using multiple factors
+     * Weights: 40% avg + 30% best + 20% coverage + 10% authority
+     */
+    function calculateCaseRelevance(caseStatsObj) {
+      const scored = {};
+      
+      for (const [caseId, stats] of Object.entries(caseStatsObj)) {
+        // Calculate metrics
+        const avgScore = stats.totalScore / stats.count;
+        const bestScore = stats.bestScore;
+        const sectionCount = stats.count;
+        
+        // Multi-factor weighted score
+        // 40% = Average relevance (most important - overall quality)
+        // 30% = Best single match (quality indicator - peak relevance)
+        // 20% = Coverage (how many sections match - breadth)
+        // 10% = Authority bonus (if applicable - precedent value)
+        
+        const relevanceScore = 
+          (avgScore * 0.40) +              // Average relevance
+          (bestScore * 0.30) +             // Best matching section
+          (Math.min(sectionCount / 5, 1.0) * 0.20) +  // Coverage (normalized to 5)
+          (getAuthorityBonus(caseId) * 0.10);         // Authority bonus
+        
+        scored[caseId] = {
+          ...stats,
+          avgScore,
+          relevanceScore,
+          breakdown: {
+            avgScoreWeight: (avgScore * 0.40).toFixed(4),
+            bestScoreWeight: (bestScore * 0.30).toFixed(4),
+            coverageWeight: (Math.min(sectionCount / 5, 1.0) * 0.20).toFixed(4),
+            authorityWeight: (getAuthorityBonus(caseId) * 0.10).toFixed(4)
+          }
+        };
+      }
+      
+      // Sort by relevance score (descending)
+      return Object.entries(scored)
+        .sort((a, b) => b[1].relevanceScore - a[1].relevanceScore)
+        .map(([caseId, stats]) => ({ caseId, ...stats }));
+    }
 
-    console.log("[searchQuestion] Initial FAISS ranking:", initialTop3CaseIds.map(caseId => ({
-      caseId,
-      bestScore: caseStats[caseId].bestScore.toFixed(4),
-      count: caseStats[caseId].count,
-      totalScore: caseStats[caseId].totalScore.toFixed(4)
+    /**
+     * Helper: Calculate authority bonus based on case metadata
+     * Higher score if case is from higher court or more recent
+     */
+    function getAuthorityBonus(caseId) {
+      // Default authority score
+      // In future: could check case metadata for court level, year, etc.
+      // For now: basic implementation = 0.5 (neutral)
+      // This allows future enhancement without breaking current logic
+      return 0.5;
+    }
+
+    // Get top 3 cases using improved weighted scoring
+    const scoredCases = calculateCaseRelevance(caseStats);
+    const initialTop3CaseIds = scoredCases
+      .slice(0, 3)
+      .map(c => c.caseId);
+
+    console.log("[searchQuestion] ✅ IMPROVED: Multi-factor relevance scoring applied");
+    console.log("[searchQuestion] Weighted case ranking:", scoredCases.slice(0, 3).map((c, idx) => ({
+      rank: idx + 1,
+      caseId: c.caseId,
+      relevanceScore: c.relevanceScore.toFixed(4),
+      avgScore: c.avgScore.toFixed(4),
+      bestScore: c.bestScore.toFixed(4),
+      coverage: c.count,
+      breakdown: c.breakdown
     })));
 
-    console.log(`[searchQuestion] Selected top 3 cases (by FAISS score): ${initialTop3CaseIds.join(', ')}`);
+    console.log(`[searchQuestion] Selected top 3 cases (by weighted relevance): ${initialTop3CaseIds.join(', ')}`);
     console.log("[searchQuestion] Top 5 sections used for answer:", topSections.slice(0, 5).map((s, idx) => ({
       index: idx,
       sectionId: s.sectionId,
@@ -248,11 +295,32 @@ You MUST NOT use:
 - Legal doctrines not explicitly mentioned in the case
 - Assumptions or speculation
 
-If the user's question cannot be clearly answered using the case provided, you MUST explicitly say:
+==================================================
+MATCHING INSTRUCTION (VERY IMPORTANT)
+==================================================
 
-"The provided case does not clearly address this specific issue."
+You must first assess how closely the provided case matches the user’s question.
 
-Do not attempt to guess or expand the law beyond what appears in the judgment.
+If the case does NOT directly answer the user's question, you MUST:
+
+1. Clearly state:
+   "No exact matching case was found in our system for this specific question."
+
+2. Then state:
+   "However, the following case is the closest available match based on similar facts or legal reasoning."
+
+3. Then:
+   - Extract and explain the case normally
+   - Identify the closest relevant reasoning or principle from the case
+   - Clearly explain the differences between the case and the user’s situation
+
+If the case DOES directly answer the question, proceed normally without the above message.
+
+IMPORTANT:
+- Do NOT pretend the case is a perfect match if it is not
+- Do NOT introduce external legal knowledge
+- Do NOT generate legal rules not present in the case
+- Always be transparent about limitations
 
 ==================================================
 PRIMARY OBJECTIVE
@@ -299,9 +367,21 @@ RESPONSE FORMAT
 
 Provide a clear answer to the user's question in 2–4 sentences.
 
-Explain whether the court's reasoning in this case suggests the user might be able to succeed or not.
+- If no exact match exists, clearly say so and mention this is the closest case.
+- If it is a strong match, answer directly.
 
-Write in simple language understandable to a non-lawyer.
+Explain in simple language understandable to a non-lawyer.
+
+───────────────────────────────────────────────
+
+🔎 Match Assessment
+
+State clearly whether this case is:
+- Strong Match
+- Partial Match
+- Closest Available Match
+
+Briefly explain why.
 
 ───────────────────────────────────────────────
 
@@ -335,11 +415,21 @@ This must strictly reflect reasoning found in the judgment.
 
 Explain how the court’s decision may apply if the user’s situation is similar to the case.
 
-If the user’s situation may differ from the facts of the case, clearly explain that limitation.
-
-If the case does not fully resolve the user's situation, state:
+If different, clearly explain:
 
 "This case may not fully apply if your factual situation differs in the following way: [explain differences based only on the case facts]."
+
+───────────────────────────────────────────────
+
+🔎 Closest Insight From This Case
+
+If the case is not a strong match, explain:
+
+- The closest reasoning or idea from the case
+- How it helps the user understand their situation
+- What key limitation exists
+
+(This must still be based ONLY on the case content.)
 
 ───────────────────────────────────────────────
 
@@ -360,7 +450,7 @@ WRITING RULES
 - Do not reference external law or cases
 - Do not mention that you are an AI
 
-Your task is to simulate careful legal reasoning based solely on the provided court judgment.
+Your task is to simulate careful legal reasoning based solely on the provided court judgment while clearly indicating how well the case matches the user’s scenario.
 `;
 
       let summary;
