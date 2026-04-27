@@ -1,4 +1,4 @@
-// Load config FIRST - this imports dotenv and runs config() before anything else
+// Load config FIRST (dotenv)
 import "./config.js";
 
 import express from "express";
@@ -12,38 +12,52 @@ import testMetadataRoute from "./routes/testMetadataRoute.js";
 
 const app = express();
 
-// CORS configuration for production
-const allowedOrigins = [
-  'http://localhost:5173', // Local development
-  'http://localhost:3000',
-  'https://lawknow.vercel.app',
-  process.env.FRONTEND_URL, // Production frontend URL
-].filter(Boolean); // Remove undefined values
-
+// ✅ FIXED CORS CONFIG (stable + production-safe)
 app.use(cors({
-  origin: function(origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
+  origin: (origin, callback) => {
+
+    console.log("Incoming Origin:", origin); // optional debug
+
+    // Allow requests without origin (Postman, mobile apps, curl)
     if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes('*')) {
+
+    // ✅ Allow frontend (Vercel + local)
+    if (
+      origin.includes("vercel.app") ||   // all Vercel deployments
+      origin.includes("localhost")       // local dev
+    ) {
       return callback(null, true);
     }
-    return callback(null, true); // For now, allow all origins
+
+    // ❌ Block everything else
+    return callback(new Error("CORS blocked: " + origin));
   },
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   credentials: true
 }));
 
+// ✅ Handle preflight requests (VERY IMPORTANT)
+app.options('*', cors());
+
+// Middleware
 app.use(express.json());
 
+// MongoDB connection
 mongoose.connect(process.env.MONGO_URI, {
   dbName: process.env.DB_NAME,
-}).then(() => console.log("✅ MongoDB connected"))
-  .catch((err) => console.error(err));
+})
+.then(() => console.log("✅ MongoDB connected"))
+.catch((err) => console.error("❌ MongoDB error:", err));
 
-
+// Routes
 app.use("/api/cases", caseRoute);
 app.use("/api/query", queryRoute);
 app.use("/api/test", geminiTestRoute);
 app.use("/api/test-metadata", testMetadataRoute);
 
+// Server start
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
