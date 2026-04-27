@@ -13,7 +13,7 @@ import testMetadataRoute from "./routes/testMetadataRoute.js";
 const app = express();
 
 // ✅ FIXED CORS CONFIG (stable + production-safe)
-app.use(cors({
+const corsOptions = {
   origin: (origin, callback) => {
 
     console.log("Incoming Origin:", origin); // optional debug
@@ -34,10 +34,13 @@ app.use(cors({
   },
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   credentials: true
-}));
+};
+
+app.use(cors(corsOptions));
 
 // ✅ Handle preflight requests (VERY IMPORTANT)
-app.options('*', cors());
+// Express 5 + path-to-regexp no longer accepts "*" as a valid path string.
+app.options(/.*/, cors(corsOptions));
 
 // Middleware
 app.use(express.json());
