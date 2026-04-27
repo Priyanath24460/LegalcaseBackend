@@ -14,7 +14,7 @@ const app = express();
 
 /**
  * =========================
- * ✅ CORS (PRODUCTION SAFE)
+ * ✅ CORS CONFIG (PRODUCTION SAFE)
  * =========================
  */
 
@@ -27,7 +27,7 @@ const corsOptions = {
   origin: function (origin, callback) {
     console.log("Incoming Origin:", origin);
 
-    // Allow server-to-server / mobile apps / curl
+    // Allow Postman / mobile apps / server-to-server
     if (!origin) return callback(null, true);
 
     // Allow only trusted origins
@@ -35,7 +35,7 @@ const corsOptions = {
       return callback(null, true);
     }
 
-    // ❗ DO NOT throw error (prevents missing headers issue)
+    // Block everything else safely (DO NOT throw error)
     return callback(null, false);
   },
 
@@ -44,27 +44,30 @@ const corsOptions = {
   credentials: true
 };
 
-// Apply CORS globally
-app.use(cors(corsOptions));
-
-/**
- * =========================
- * ✅ HANDLE PRE-FLIGHT
- * =========================
- * IMPORTANT: MUST NOT use "*" with Express 5/router
- */
-app.options("*", cors(corsOptions));
-
 /**
  * =========================
  * MIDDLEWARE
  * =========================
  */
+app.use(cors(corsOptions));
 app.use(express.json());
 
 /**
  * =========================
- * DATABASE
+ * OPTIONAL SAFE OPTIONS HANDLER
+ * (no wildcard = no crash)
+ * =========================
+ */
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
+/**
+ * =========================
+ * DATABASE CONNECTION
  * =========================
  */
 mongoose.connect(process.env.MONGO_URI, {
