@@ -1,5 +1,5 @@
 import { searchCases } from "../services/faissService.js";
-import { summarizeCase, rewriteQuestion, rankCasesRelevance } from "../services/geminiService.js";
+import { summarizeCase, rewriteQuestion, rankCasesRelevance, getBriefIdea } from "../services/geminiService.js";
 import Case from "../models/caseModel.js";
 import { validateAndSanitize } from "../utils/questionValidator.js";
 
@@ -232,7 +232,7 @@ export const searchQuestion = async (req, res) => {
     // Use the AI-reordered cases for final processing
     const top3CaseIds = reorderedSelectedCases.map(c => c.caseId);
 
-    // Generate summaries for all selected cases
+    // Generate summaries/ideas for selected cases
     const caseSummaries = [];
     
     for (let i = 0; i < reorderedSelectedCases.length; i++) {
@@ -242,18 +242,16 @@ export const searchQuestion = async (req, res) => {
       console.log(`\n=== PROCESSING CASE ${i + 1} OF ${selectedCases.length} ===`);
       console.log(`Case ID: ${selectedCase.caseId}`);
       console.log(`Title: ${selectedCase.title}`);
-      console.log(`Court: ${selectedCase.metadata?.court || 'N/A'}`);
-      console.log(`Year: ${selectedCase.metadata?.year || 'N/A'}`);
-      console.log(`Full Text Length: ${selectedCase.fullText.length} characters`);
-      console.log(`Top Matching Sections: ${relevantSections.length}`);
-      relevantSections.forEach((section, index) => {
-        console.log(`  Section ${index + 1}: Score = ${section.score?.toFixed(4) || 'N/A'}`);
-      });
-      console.log("====================================");
+      
+      let summary;
+      let isFullAnswer = false;
 
-      // Build context with FULL CASE TEXT (not just sections)
-      const context = `=== FULL CASE DOCUMENT ===
-
+      // Only generate FULL summary for the BEST match (rank 1)
+      if (i === 0) {
+        console.log(`[searchQuestion] Generating FULL summary for BEST match (Case ${i + 1})`);
+        
+        // Build context with FULL CASE TEXT
+        const context = `=== FULL CASE DOCUMENT ===
 Case Title: ${selectedCase.title || 'Unknown'}
 Case Number: ${selectedCase.metadata?.caseNumber || 'N/A'}
 Court: ${selectedCase.metadata?.court || 'Unknown Court'}
@@ -262,74 +260,77 @@ Judges: ${Array.isArray(selectedCase.metadata?.judges) ? selectedCase.metadata.j
 Case Type: ${selectedCase.metadata?.caseType || 'N/A'}
 
 === COMPLETE CASE TEXT ===
-
 ${selectedCase.fullText}
-
 === END OF CASE ===`;
 
-      console.log(`\n=== FULL TEXT BEING SENT TO AI (Case ${i + 1}) ===`);
-      console.log(`Full Text Length: ${selectedCase.fullText.length} characters`);
-      console.log(`Full Text Preview (first 500 chars):\n${selectedCase.fullText.substring(0, 500)}...`);
-      console.log(`\nFull Text Preview (last 300 chars):\n...${selectedCase.fullText.substring(selectedCase.fullText.length - 300)}`);
-      console.log("====================================\n");
-      
-      console.log(`[searchQuestion] Full case context for Gemini (length: ${context.length} characters)`);
-      console.log(`[searchQuestion] Complete context being sent to AI:\n${context.substring(0, 800)}...\n...${context.substring(context.length - 300)}`);
-       
-      // Question-focused prompt that directly answers user queries with FULL CASE
-      const prompt = `
-You are an AI legal reasoning assistant designed to analyze Sri Lankan court judgments.
+        const prompt = `
+You are an AI legal reasoning assistant designed to analyze Sri Lankan law and court judgments.
 
-Your task is to answer the user's legal question by reasoning strictly from the SINGLE court case provided below.
+Your task is to answer the user's legal question by combining:
+1. General legal principles of Sri Lankan law
+2. The provided court case as supporting authority
 
 ==================================================
-STRICT SOURCE LIMITATION
+SOURCE USAGE RULES (CRITICAL)
 ==================================================
 
-You are allowed to rely ONLY on the information contained in the case document provided.
+You may use:
+- General legal principles of Sri Lankan law
+- The provided case document
 
-You MUST NOT use:
-- Outside legal knowledge
-- General knowledge of Sri Lankan law
-- Other court cases
-- Legal doctrines not explicitly mentioned in the case
-- Assumptions or speculation
+You MUST NOT:
+- Invent case facts
+- Misrepresent the judgment
+- Cite cases not provided
+- Speculate beyond available information
+
+IMPORTANT:
+- The case is NOT the only source of truth
+- The case must be used as SUPPORTING AUTHORITY
+- If the case does not fully answer the question, you MUST clearly say so
 
 ==================================================
 MATCHING INSTRUCTION (VERY IMPORTANT)
 ==================================================
 
-You must first assess how closely the provided case matches the user’s question.
+You must assess how closely the provided case matches the user’s question.
 
-If the case does NOT directly answer the user's question, you MUST:
+Use the following rules:
+
+- Strong Match → Case directly answers the legal question
+- Partial Match → Case explains only part of the issue
+- Closest Available Match → Case is only loosely related
+
+If the case DOES NOT directly answer the question:
 
 1. Clearly state:
-   "No exact matching case was found in our system for this specific question."
+   "No exact matching case was found for this specific question."
 
 2. Then state:
-   "However, the following case is the closest available match based on similar facts or legal reasoning."
+   "However, the following case provides the closest relevant legal guidance."
 
 3. Then:
-   - Extract and explain the case normally
-   - Identify the closest relevant reasoning or principle from the case
-   - Clearly explain the differences between the case and the user’s situation
-
-If the case DOES directly answer the question, proceed normally without the above message.
+   - Provide the GENERAL LEGAL ANSWER first
+   - Explain the case
+   - Identify the closest relevant reasoning from the case
+   - Clearly explain the differences
 
 IMPORTANT:
-- Do NOT pretend the case is a perfect match if it is not
-- Do NOT introduce external legal knowledge
-- Do NOT generate legal rules not present in the case
-- Always be transparent about limitations
+- Do NOT label a case as “Strong Match” unless it fully answers the question
+- Be honest and transparent
 
 ==================================================
 PRIMARY OBJECTIVE
 ==================================================
 
-Your goal is to help a user understand how the court’s reasoning in this case may relate to their situation.
+Your goal is to help a user understand:
+- What the law generally requires
+- How courts apply that law in real cases
 
-The DIRECT ANSWER section must be written clearly for a non-lawyer citizen.  
-Use simple language and avoid unnecessary legal jargon.
+The DIRECT ANSWER must:
+- Be clear and simple
+- Be understandable to a non-lawyer
+- Avoid unnecessary legal jargon
 
 ==================================================
 USER QUESTION
@@ -347,17 +348,16 @@ ${context}
 REQUIRED ANALYSIS PROCESS
 ==================================================
 
-1. Carefully read the entire case document.
-2. Identify the following elements from the judgment:
+1. Carefully read the case document
+2. Identify:
    - Material facts relevant to the issue
-   - The legal issue decided by the court
-   - The court’s holding
-   - The reasoning used by the court (ratio decidendi)
-3. Focus only on facts relevant to the user’s question.
-4. Ignore irrelevant background or procedural details unless necessary.
-5. Do NOT expand the legal rule beyond what the court actually stated.
-
-If the user's scenario appears materially different from the facts of the case, clearly explain the limitation.
+   - Legal issue decided
+   - Court’s holding
+   - Reasoning (ratio decidendi)
+3. Determine whether the case fully or partially answers the question
+4. Extract only relevant information
+5. Do NOT expand case reasoning beyond what is stated
+6. Use general legal principles to complete the answer where needed
 
 ==================================================
 RESPONSE FORMAT
@@ -365,101 +365,124 @@ RESPONSE FORMAT
 
 🎯 DIRECT ANSWER
 
-Provide a clear answer to the user's question in 2–4 sentences.
-
-- If no exact match exists, clearly say so and mention this is the closest case.
-- If it is a strong match, answer directly.
-
-Explain in simple language understandable to a non-lawyer.
+- Give a clear answer in 2–4 sentences
+- Start with the GENERAL LEGAL RULE
+- Then briefly connect it to the case
+- Use simple language
 
 ───────────────────────────────────────────────
 
-🔎 Match Assessment
+📖 General Legal Principle
 
-State clearly whether this case is:
-- Strong Match
-- Partial Match
-- Closest Available Match
+Explain the general law in Sri Lanka relevant to the question.
 
-Briefly explain why.
+IMPORTANT:
+- Do NOT state or imply that a complainant’s testimony alone is insufficient
+- Instead say:
+  "A complainant’s testimony may be sufficient if the court finds it credible, but courts often consider surrounding circumstances to assess reliability"
+
+Include:
+- Key legal elements (e.g., consent, intent, evidence)
+- Keep it accurate and balanced
 
 ───────────────────────────────────────────────
 
-📖 Legal Basis From This Case
+📚 Case Support
 
-Case Name: (Use the exact title from metadata)  
+Case Name: (Use exact title)  
 Court: (From metadata)  
 Year: (From metadata)  
 Citation: (If available)
 
 Relevant Material Facts:
+(Only facts necessary for understanding the issue)
 
-Describe only the facts necessary to understand the issue decided in the case.
-
-Legal Issue Decided:
-
-State the precise legal question the court determined.
+Legal Issue:
+(The exact legal question the court decided)
 
 Court’s Holding:
-
-Explain what the court ultimately decided.
+(What the court decided)
 
 Reasoning (Ratio Decidendi):
+(Why the court made that decision — strictly based on the case)
 
-Explain the reasoning used by the court to reach its decision.  
-This must strictly reflect reasoning found in the judgment.
+IMPORTANT:
+- Do NOT overemphasize one factor (e.g., subsequent conduct)
+- Present reasoning as one part of the overall evaluation
 
 ───────────────────────────────────────────────
 
 💡 Application To the User’s Question
 
-Explain how the court’s decision may apply if the user’s situation is similar to the case.
+Explain:
+- How the general law applies
+- How the case supports or illustrates it
 
-If different, clearly explain:
+Use balanced language:
+- Say "courts may consider" instead of "courts rely heavily on"
+- Emphasize "totality of the evidence"
 
-"This case may not fully apply if your factual situation differs in the following way: [explain differences based only on the case facts]."
+If different:
+"This case may not fully apply if your situation differs in the following way: [clear explanation]"
+
+───────────────────────────────────────────────
+
+🔎 Match Assessment
+
+State one:
+- Strong Match
+- Partial Match
+- Closest Available Match
+
+Explain briefly:
+- Why the case fits or does not fully fit
 
 ───────────────────────────────────────────────
 
 🔎 Closest Insight From This Case
 
-If the case is not a strong match, explain:
+(Only if NOT a strong match)
 
-- The closest reasoning or idea from the case
-- How it helps the user understand their situation
-- What key limitation exists
-
-(This must still be based ONLY on the case content.)
+Explain:
+- The most relevant idea from the case
+- How it helps understanding
+- What limitation exists
 
 ───────────────────────────────────────────────
 
-⚠️ Limitation
+⚠️ Limitations
 
-This answer is generated strictly from the single case provided above.  
-No other legal sources or external knowledge have been used.
+- This answer combines general legal principles and the provided case
+- The case may not represent all legal scenarios
+- Legal outcomes depend on specific facts and evidence
+- This is for informational purposes and not a substitute for professional legal advice
 
 ==================================================
 WRITING RULES
 ==================================================
 
-- Write in clear professional language
-- Do not speculate
-- Do not add legal rules not present in the case
-- Do not include dramatic tone
-- Do not produce textbook explanations
-- Do not reference external law or cases
-- Do not mention that you are an AI
+- Use clear, professional language
+- Avoid unnecessary legal jargon
+- Do NOT hallucinate laws or case facts
+- Do NOT exaggerate the relevance of the case
+- Be honest about uncertainty
+- Keep explanations practical and user-focused
 
-Your task is to simulate careful legal reasoning based solely on the provided court judgment while clearly indicating how well the case matches the user’s scenario.
+Your goal is to simulate a careful legal assistant who explains both the law and how courts apply it in real cases.
 `;
 
-      let summary;
-      try {
-        summary = await summarizeCase(prompt);
-        console.log(`[searchQuestion] Gemini summary for case ${i + 1}:`, summary?.slice(0, 200) + (summary?.length > 200 ? '...' : ''));
-      } catch (err) {
-        console.error(`[searchQuestion] summarizeCase threw error for case ${i + 1}:`, err);
-        summary = "Error generating summary for this case.";
+        try {
+          summary = await summarizeCase(prompt);
+          isFullAnswer = true;
+        } catch (err) {
+          console.error(`[searchQuestion] summarizeCase threw error for case ${i + 1}:`, err);
+          summary = "Error generating full summary for this case.";
+        }
+      } else {
+        // Skip generation for secondary matches to save time/tokens
+        console.log(`[searchQuestion] Skipping summary generation for secondary match (Case ${i + 1})`);
+        summary = ""; // Empty summary initially
+        isFullAnswer = false;
       }
 
       caseSummaries.push({
@@ -476,6 +499,7 @@ Your task is to simulate careful legal reasoning based solely on the provided co
           rank: i + 1
         },
         summary,
+        isFullAnswer,
         relevantSections
       });
     }
@@ -562,5 +586,259 @@ export const rewriteUserQuestion = async (req, res) => {
       message: "Failed to rewrite question. Please try again later.",
       details: err.message
     });
+  }
+};
+
+/**
+ * Get full answer for a specific case (on-demand generation)
+ */
+export const getCaseFullAnswer = async (req, res) => {
+  try {
+    const { question, caseId } = req.body;
+    console.log(`[getCaseFullAnswer] Request for Case ID: ${caseId}, Question: ${question}`);
+
+    if (!question || !caseId) {
+      return res.status(400).json({ error: "Question and Case ID are required" });
+    }
+
+    // Validate and sanitize the question
+    const validation = validateAndSanitize(question);
+    const sanitizedQuestion = validation.isValid ? validation.question : question;
+
+    const caseDoc = await Case.findOne({ caseId });
+    if (!caseDoc || !caseDoc.fullText) {
+      return res.status(404).json({ error: "Case not found" });
+    }
+
+    const context = `=== FULL CASE DOCUMENT ===
+Case Title: ${caseDoc.title || 'Unknown'}
+Case Number: ${caseDoc.metadata?.caseNumber || 'N/A'}
+Court: ${caseDoc.metadata?.court || 'Unknown Court'}
+Year: ${caseDoc.metadata?.year || 'N/A'}
+Judges: ${Array.isArray(caseDoc.metadata?.judges) ? caseDoc.metadata.judges.join(', ') : 'N/A'}
+Case Type: ${caseDoc.metadata?.caseType || 'N/A'}
+
+=== COMPLETE CASE TEXT ===
+${caseDoc.fullText}
+=== END OF CASE ===`;
+
+    const prompt = `
+You are an AI legal reasoning assistant designed to analyze Sri Lankan law and court judgments.
+
+Your task is to answer the user's legal question by combining:
+1. General legal principles of Sri Lankan law
+2. The provided court case as supporting authority
+
+==================================================
+SOURCE USAGE RULES (CRITICAL)
+==================================================
+
+You may use:
+- General legal principles of Sri Lankan law
+- The provided case document
+
+You MUST NOT:
+- Invent case facts
+- Misrepresent the judgment
+- Cite cases not provided
+- Speculate beyond available information
+
+IMPORTANT:
+- The case is NOT the only source of truth
+- The case must be used as SUPPORTING AUTHORITY
+- If the case does not fully answer the question, you MUST clearly say so
+
+==================================================
+MATCHING INSTRUCTION (VERY IMPORTANT)
+==================================================
+
+You must assess how closely the provided case matches the user’s question.
+
+Use the following rules:
+
+- Strong Match → Case directly answers the legal question
+- Partial Match → Case explains only part of the issue
+- Closest Available Match → Case is only loosely related
+
+If the case DOES NOT directly answer the question:
+
+1. Clearly state:
+   "No exact matching case was found for this specific question."
+
+2. Then state:
+   "However, the following case provides the closest relevant legal guidance."
+
+3. Then:
+   - Provide the GENERAL LEGAL ANSWER first
+   - Explain the case
+   - Identify the closest relevant reasoning from the case
+   - Clearly explain the differences
+
+IMPORTANT:
+- Do NOT label a case as “Strong Match” unless it fully answers the question
+- Be honest and transparent
+
+==================================================
+PRIMARY OBJECTIVE
+==================================================
+
+Your goal is to help a user understand:
+- What the law generally requires
+- How courts apply that law in real cases
+
+The DIRECT ANSWER must:
+- Be clear and simple
+- Be understandable to a non-lawyer
+- Avoid unnecessary legal jargon
+
+==================================================
+USER QUESTION
+==================================================
+
+${sanitizedQuestion}
+
+==================================================
+CASE DOCUMENT PROVIDED
+==================================================
+
+${context}
+
+==================================================
+REQUIRED ANALYSIS PROCESS
+==================================================
+
+1. Carefully read the case document
+2. Identify:
+   - Material facts relevant to the issue
+   - Legal issue decided
+   - Court’s holding
+   - Reasoning (ratio decidendi)
+3. Determine whether the case fully or partially answers the question
+4. Extract only relevant information
+5. Do NOT expand case reasoning beyond what is stated
+6. Use general legal principles to complete the answer where needed
+
+==================================================
+RESPONSE FORMAT
+==================================================
+
+🎯 DIRECT ANSWER
+
+- Give a clear answer in 2–4 sentences
+- Start with the GENERAL LEGAL RULE
+- Then briefly connect it to the case
+- Use simple language
+
+───────────────────────────────────────────────
+
+📖 General Legal Principle
+
+Explain the general law in Sri Lanka relevant to the question.
+
+IMPORTANT:
+- Do NOT state or imply that a complainant’s testimony alone is insufficient
+- Instead say:
+  "A complainant’s testimony may be sufficient if the court finds it credible, but courts often consider surrounding circumstances to assess reliability"
+
+Include:
+- Key legal elements (e.g., consent, intent, evidence)
+- Keep it accurate and balanced
+
+───────────────────────────────────────────────
+
+📚 Case Support
+
+Case Name: (Use exact title)  
+Court: (From metadata)  
+Year: (From metadata)  
+Citation: (If available)
+
+Relevant Material Facts:
+(Only facts necessary for understanding the issue)
+
+Legal Issue:
+(The exact legal question the court decided)
+
+Court’s Holding:
+(What the court decided)
+
+Reasoning (Ratio Decidendi):
+(Why the court made that decision — strictly based on the case)
+
+IMPORTANT:
+- Do NOT overemphasize one factor (e.g., subsequent conduct)
+- Present reasoning as one part of the overall evaluation
+
+───────────────────────────────────────────────
+
+💡 Application To the User’s Question
+
+Explain:
+- How the general law applies
+- How the case supports or illustrates it
+
+Use balanced language:
+- Say "courts may consider" instead of "courts rely heavily on"
+- Emphasize "totality of the evidence"
+
+If different:
+"This case may not fully apply if your situation differs in the following way: [clear explanation]"
+
+───────────────────────────────────────────────
+
+🔎 Match Assessment
+
+State one:
+- Strong Match
+- Partial Match
+- Closest Available Match
+
+Explain briefly:
+- Why the case fits or does not fully fit
+
+───────────────────────────────────────────────
+
+🔎 Closest Insight From This Case
+
+(Only if NOT a strong match)
+
+Explain:
+- The most relevant idea from the case
+- How it helps understanding
+- What limitation exists
+
+───────────────────────────────────────────────
+
+⚠️ Limitations
+
+- This answer combines general legal principles and the provided case
+- The case may not represent all legal scenarios
+- Legal outcomes depend on specific facts and evidence
+- This is for informational purposes and not a substitute for professional legal advice
+
+==================================================
+WRITING RULES
+==================================================
+
+- Use clear, professional language
+- Avoid unnecessary legal jargon
+- Do NOT hallucinate laws or case facts
+- Do NOT exaggerate the relevance of the case
+- Be honest about uncertainty
+- Keep explanations practical and user-focused
+
+Your goal is to simulate a careful legal assistant who explains both the law and how courts apply it in real cases
+`;
+
+    const summary = await summarizeCase(prompt);
+
+    return res.json({
+      caseId,
+      summary,
+      success: true
+    });
+  } catch (err) {
+    console.error("[getCaseFullAnswer] Error:", err);
+    return res.status(500).json({ error: "Failed to generate full answer" });
   }
 };

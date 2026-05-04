@@ -1,8 +1,8 @@
 # Gemini API Key Rotation System
 
 ## Overview
-This system automatically rotates between 3 Gemini API keys when one hits its rate limit (429 error). If a key exceeds quota, the system will:
-1. Detect the rate limit error (HTTP 429)
+This system automatically rotates between configured Gemini API keys when one hits a rate limit (429 error) or when Google's servers are busy (503 High Demand error). If a key encounters one of these transient errors, the system will:
+1. Detect the error (HTTP 429 or 503)
 2. Mark that key for cooldown (60 minutes by default)
 3. Switch to the next available key
 4. Retry the request automatically
@@ -33,7 +33,7 @@ You can add 1-3 keys. The system only uses keys that are configured (not empty).
 ```
 Available Key → Request Made → ✅ Success (Continue)
                              ↓
-                          ❌ Rate Limit (429)
+                      ❌ 429/503 Error
                              ↓
                     Mark for Cooldown (60 min)
                              ↓
@@ -46,7 +46,8 @@ Available Key → Request Made → ✅ Success (Continue)
 Watch for these log messages:
 
 - `[Gemini] Using API key 1/3` → Current key in use
-- `[Gemini] 🔴 Rate limit hit on key 1` → Key hit quota limit
+- `[Gemini] 🔴 Rate limit hit on key 1` → Key hit quota limit (429)
+- `[Gemini] 🔴 High demand (503) hit on key 1` → Google servers busy (503)
 - `[Gemini] Key 1 is in cooldown, trying next...` → Waiting before retry
 - `[Gemini] Rotated to key 2/3` → Switched to next key
 - `[Gemini] All API keys are in cooldown` → All keys exhausted
@@ -60,11 +61,14 @@ To monitor key usage, check the Node.js server logs for:
 [Gemini] Full API response: {...}
 ```
 
-To see when rate limits are hit:
-
 ```
 [Gemini] 🔴 Rate limit hit on key 1. Error: {message: "Resource has been exhausted..."}
-[Gemini] Retrying with next API key...
+[Gemini] Retrying with next API key due to Rate limit...
+```
+OR
+```
+[Gemini] 🔴 High demand (503) hit on key 1. Error: {message: "Service Unavailable..."}
+[Gemini] Retrying with next API key due to High demand (503)...
 ```
 
 ## Cooldown Management
@@ -93,7 +97,7 @@ To maximize usage across keys:
 ## Troubleshooting
 
 ### "All API keys are rate limited"
-- **Cause**: All 3 keys hit their quota limits within the same hour
+- **Cause**: All keys hit quota limits (429) or Google servers are broadly overloaded (503) within the same hour
 - **Solution**: 
   1. Wait 60+ minutes for cooldown to expire
   2. Check Google Cloud Console for actual quota limits
@@ -133,7 +137,7 @@ To maximize usage across keys:
 
 - **`.env`** - Added GEMINI_API_KEY_1, KEY_2, KEY_3
 - **`config.js`** - Now loads array of keys instead of single key
-- **`services/geminiService.js`** - Added rotation logic with 429 error handling
+- **`services/geminiService.js`** - Added rotation logic with 429 and 503 error handling
 
 ## Function Reference
 

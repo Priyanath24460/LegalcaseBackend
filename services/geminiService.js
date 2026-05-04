@@ -110,14 +110,15 @@ const callGeminiAPI = async (promptText, retryCount = 0) => {
     if (err.response) {
       const status = err.response.status;
       
-      // Handle rate limit (429)
-      if (status === 429) {
-        console.warn(`[Gemini] 🔴 Rate limit hit on key ${currentKeyIndex + 1}. Error:`, err.response.data);
+      // Handle rate limit (429) or service unavailable (503)
+      if (status === 429 || status === 503) {
+        const errorType = status === 429 ? "Rate limit" : "High demand (503)";
+        console.warn(`[Gemini] 🔴 ${errorType} hit on key ${currentKeyIndex + 1}. Error:`, err.response.data);
         markKeyAsRateLimited(currentKeyIndex);
         rotateKey();
         
         // Retry with next key
-        console.log("[Gemini] Retrying with next API key...");
+        console.log(`[Gemini] Retrying with next API key due to ${errorType}...`);
         return callGeminiAPI(promptText, retryCount + 1);
       }
       
@@ -403,8 +404,8 @@ REWRITTEN QUESTION (respond with ONLY the improved question, no explanations or 
   } catch (err) {
     console.error("[Gemini] ❌ Question rewrite failed:", err.message);
     
-    // Check if it's a rate limit error
-    if (err.response && err.response.status === 429) {
+    // Check if it's a rate limit or service unavailable error
+    if (err.response && (err.response.status === 429 || err.response.status === 503)) {
       throw new Error("RATE_LIMIT");
     }
     
@@ -604,5 +605,40 @@ const parseRankingResponse = (response, topCases) => {
   } catch (err) {
     console.error(`[Gemini Ranker] Error parsing response:`, err.message);
     return null;
+  }
+};
+
+/**
+ * Generate a brief (2-sentence) idea of why a case matches the user's question.
+ * This is used for secondary results to reduce initial load time.
+ * 
+ * @param {string} question - The user's original question
+ * @param {Object} caseDoc - The MongoDB case document
+ * @returns {Promise<string>} - A short 2-sentence summary
+ */
+export const getBriefIdea = async (question, caseDoc) => {
+  try {
+    const context = `Case Title: ${caseDoc.title}
+Court: ${caseDoc.metadata?.court || 'N/A'}
+Year: ${caseDoc.metadata?.year || 'N/A'}
+Case Preview: ${caseDoc.fullText.substring(0, 1000)}...`;
+
+    const prompt = `
+You are a legal assistant. Provide a VERY BRIEF (strictly 1-2 sentences) "idea" of why the following court case is relevant to the user's question.
+
+USER QUESTION:
+"${question}"
+
+CASE DETAILS:
+${context}
+
+Focus on the core legal connection. Do not provide a full summary.
+`;
+
+    const briefIdea = await callGeminiAPI(prompt);
+    return briefIdea.trim();
+  } catch (err) {
+    console.error("[Gemini] getBriefIdea failed:", err.message);
+    return "This case discusses legal principles relevant to your situation.";
   }
 };
